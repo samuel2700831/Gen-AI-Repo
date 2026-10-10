@@ -8,7 +8,10 @@ import unittest
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
-from app import ALIASES, DATE_FORMATS, REQUIRED, export_csv, parse_upload, read_upload, suggest_mapping
+from app import (
+    ALIASES, DATE_FORMATS, REQUIRED, export_csv, interpreted_date_preview,
+    parse_upload, read_upload, suggest_mapping,
+)
 
 
 def csv_bytes(headers, values):
@@ -26,6 +29,17 @@ MAPPING = dict(zip(REQUIRED, CUSTOM_HEADERS))
 
 
 class CsvImportTests(unittest.TestCase):
+    def test_interpreted_preview_preserves_values_and_limits_rows(self):
+        values = pd.Series([" 03/04/2026 ", "02/30/2026", "", "3/04/2026"] + ["05/06/2026"] * 8)
+        original = values.copy()
+        preview = interpreted_date_preview(values, "MM/DD/YYYY")
+        self.assertEqual(len(preview), 10)
+        self.assertEqual(preview["CSV row"].tolist(), list(range(2, 12)))
+        self.assertEqual(preview["Original date"].tolist(), values.head(10).tolist())
+        self.assertEqual(preview["Interpreted date (YYYY-MM-DD)"].tolist()[:4],
+                         ["2026-03-04", "Invalid date", "Invalid date", "Invalid date"])
+        pd.testing.assert_series_equal(values, original)
+
     def dated_csv(self, *dates):
         output = StringIO()
         writer = csv.writer(output)
@@ -182,6 +196,69 @@ class CsvImportTests(unittest.TestCase):
 
 
 class MappingUiTests(unittest.TestCase):
+    def assert_active_unchanged(self, app, original):
+        pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
+        self.assertEqual(app.session_state.dataset_source, "sample")
+        self.assertEqual(app.session_state.dataset_fingerprint, "sample")
+        for key in ("date_filter", "channel_filter", "audience_filter", "goal_filter"):
+            self.assertEqual(app.session_state[key], ["original"])
+        self.assertNotIn("last_successful_csv_mapping", app.session_state)
+
+    def test_live_date_preview_edits_then_confirms_latest_interpretation(self):
+        headers = [*CUSTOM_HEADERS, "Other date"]
+        data = csv_bytes(headers, ["03/04/2026", *VALUES[1:], "05/06/2026"])
+        app = self.app(data)
+        original = app.session_state.campaign_rows.copy()
+        self.assertEqual(len(app.dataframe), 1)
+        for field, header in MAPPING.items():
+            app.selectbox(key=f"csv_mapping_{field}").select(header)
+        app.selectbox(key="csv_date_format").select("MM/DD/YYYY").run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.dataframe[1].value["Original date"].tolist(), ["03/04/2026"])
+        self.assertEqual(app.dataframe[1].value["Interpreted date (YYYY-MM-DD)"].tolist(),
+                         ["2026-03-04"])
+        self.assert_active_unchanged(app, original)
+        app.selectbox(key="csv_date_format").select("DD/MM/YYYY").run()
+        self.assertEqual(app.dataframe[1].value.iloc[0, 2], "2026-04-03")
+        self.assert_active_unchanged(app, original)
+        app.selectbox(key="csv_mapping_date").select("Other date").run()
+        self.assertEqual(app.dataframe[1].value.iloc[0, 1], "05/06/2026")
+        self.assertEqual(app.dataframe[1].value.iloc[0, 2], "2026-06-05")
+        self.assert_active_unchanged(app, original)
+        app.selectbox(key="csv_mapping_date").select_index(0).run()
+        self.assertEqual(len(app.dataframe), 1)
+        self.assert_active_unchanged(app, original)
+        app.selectbox(key="csv_mapping_date").select("When").run()
+        app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(app.error)
+        self.assertEqual(app.session_state.campaign_rows.iloc[0]["date"],
+                         pd.Timestamp("2026-04-03"))
+        self.assertEqual(app.session_state.dataset_source, "custom.csv")
+        self.assertEqual(app.session_state.dataset_fingerprint, "custom")
+        self.assertEqual(app.session_state.date_filter,
+                         (pd.Timestamp("2026-04-03").date(),) * 2)
+        for key in ("channel_filter", "audience_filter", "goal_filter"):
+            self.assertEqual(app.session_state[key], [])
+
+    def test_date_preview_does_not_skip_invalid_rows_beyond_sample(self):
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(CUSTOM_HEADERS)
+        for value in ["03/04/2026"] * 10 + ["02/30/2026"]:
+            writer.writerow([value, *VALUES[1:]])
+        app = self.app(output.getvalue().encode("utf-8"))
+        original = app.session_state.campaign_rows.copy()
+        for field, header in MAPPING.items():
+            app.selectbox(key=f"csv_mapping_{field}").select(header)
+        app.selectbox(key="csv_date_format").select("MM/DD/YYYY").run()
+        self.assertEqual(len(app.dataframe[1].value), 10)
+        self.assertNotIn("Invalid date", app.dataframe[1].value.iloc[:, 2].tolist())
+        self.assert_active_unchanged(app, original)
+        app.button[0].click().run()
+        self.assertIn("Row 12:", app.error[0].value)
+        self.assert_active_unchanged(app, original)
+
     def test_date_format_failure_retry_and_confirmation(self):
         data = csv_bytes(CUSTOM_HEADERS, ["03/04/2026", *VALUES[1:]])
         app = self.app(data)
@@ -195,8 +272,10 @@ class MappingUiTests(unittest.TestCase):
         self.assertNotIn("last_successful_csv_mapping", app.session_state)
         self.assertEqual(app.session_state.date_filter, ["original"])
         pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
-        app.selectbox(key="csv_date_format").select("DD/MM/YYYY")
-        # Form edits remain local until submission, just as in the browser.
+        self.assertEqual(app.dataframe[1].value.iloc[0, 2], "Invalid date")
+        app.selectbox(key="csv_date_format").select("DD/MM/YYYY").run()
+        self.assertEqual(app.dataframe[1].value.iloc[0, 2], "2026-04-03")
+        # Live preview edits still leave the active dataset untouched.
         pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
         self.assertEqual(app.session_state.dataset_source, "sample")
         self.assertEqual(app.session_state.date_filter, ["original"])

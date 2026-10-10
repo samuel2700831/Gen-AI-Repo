@@ -105,6 +105,25 @@ def suggest_mapping(frame: pd.DataFrame) -> dict[str, str | None]:
     return mapping
 
 
+def interpret_dates(values: pd.Series, date_format: str) -> pd.Series:
+    """Use the same strict date interpretation for preview and final validation."""
+    parser_format, pattern = DATE_FORMATS[date_format]
+    cleaned = values.astype(str).str.strip()
+    parsed = pd.to_datetime(cleaned, format=parser_format, errors="coerce", exact=True)
+    return parsed.where(cleaned.str.fullmatch(pattern))
+
+
+def interpreted_date_preview(values: pd.Series, date_format: str) -> pd.DataFrame:
+    """Return a small, non-committing comparison without altering CSV values."""
+    sample = values.head(10)
+    return pd.DataFrame({
+        "CSV row": sample.index + 2,
+        "Original date": sample,
+        "Interpreted date (YYYY-MM-DD)": interpret_dates(sample, date_format)
+        .dt.strftime("%Y-%m-%d").fillna("Invalid date"),
+    })
+
+
 def validate_upload(
     frame: pd.DataFrame,
     mapping: dict[str, str | None],
@@ -135,9 +154,8 @@ def validate_upload(
             row = int(frame.index[frame[column].eq("")][0]) + 2
             raise ValueError(f"Row {row}: {column} cannot be blank.")
 
-    parser_format, pattern = DATE_FORMATS[date_format]
-    parsed_dates = pd.to_datetime(frame["date"], format=parser_format, errors="coerce", exact=True)
-    bad_dates = parsed_dates.isna() | ~frame["date"].str.fullmatch(pattern)
+    parsed_dates = interpret_dates(frame["date"], date_format)
+    bad_dates = parsed_dates.isna()
     if bad_dates.any():
         raise ValueError(
             f"Row {int(frame.index[bad_dates][0]) + 2}: date must be a valid {date_format} date. "
@@ -225,7 +243,9 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
         )
     options = [None, *preview.columns]
     mapping: dict[str, str | None] = {}
-    with st.form("csv_column_mapping"):
+    # These controls rerun immediately so the interpretation shown above the
+    # confirmation button always reflects the current mapping and date format.
+    with st.container():
         for field in ALIASES:
             mapping[field] = st.selectbox(
                 f"{field.title()} {'(optional)' if field == 'revenue' else '(required)'}",
@@ -245,7 +265,20 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
                 "Mixed formats and impossible dates are rejected. Choose again for each new file."
             ),
         )
-        submitted = st.form_submit_button("Import mapped CSV", width="stretch")
+        st.subheader("Review interpreted dates")
+        st.caption(
+            f"Using {date_format} · showing the first 10 dates from the selected column. "
+            "Check the month/day order before importing. This preview does not change "
+            "your current dataset or filters; every row is validated on confirmation."
+        )
+        if mapping["date"] is None:
+            st.caption("Map the required Date field to see its interpreted dates.")
+        else:
+            st.dataframe(
+                interpreted_date_preview(preview[mapping["date"]], date_format),
+                hide_index=True, width="stretch",
+            )
+        submitted = st.button("Import mapped CSV", width="stretch")
     if submitted:
         try:
             parsed = validate_upload(preview, mapping, date_format)
