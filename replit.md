@@ -1,8 +1,14 @@
-# [Project name]
+# Ad Campaign Performance Analyzer
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A CSV-powered marketing dashboard comparing campaign spend, clicks, conversions, and ROI across Facebook, Instagram, Pinterest, and Twitter.
 
 ## Run & Operate
+
+- `artifacts/campaign-analyzer: web` — managed dashboard preview workflow
+- `pnpm --filter @workspace/campaign-analyzer run typecheck` — dashboard type check
+- CSV processing is browser-only; uploads are session-only, not sent to the API server.
+- Required CSV columns: `date` (YYYY-MM-DD), `campaign`, `channel`, `audience`, `goal`, `spend`, `clicks`, `conversions`. Optional: `revenue`.
+- Monetary inputs must use one currency (USD). File limit: 5 MB / 50,000 rows.
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
 - `pnpm run typecheck` — full typecheck across all packages
@@ -30,7 +36,7 @@ _Populate as you build — non-obvious choices a reader couldn't infer from the 
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Four views: Overview, Platform Comparison, searchable Campaign Details, and Time Series. All use shared date, channel, audience, and goal filters. The initial dataset is explicitly labeled sample data.
 
 ## User preferences
 

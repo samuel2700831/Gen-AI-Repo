@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Ad Campaign Performance Analyzer"
+description = "CSV-powered marketing dashboard comparing spend, clicks, conversions and ROI across Facebook, Instagram, Pinterest and Twitter, with shared filters and four analytical views."
+version = "1.0.0"
+id = "artifacts/campaign-analyzer"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19033
+
+[services.development]
+run = "pnpm --filter @workspace/campaign-analyzer run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/campaign-analyzer", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/campaign-analyzer/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19033"
+BASE_PATH = "/"

@@ -1,0 +1,1 @@
+- [Marketing metric rules](marketing-metrics.md) — ROI requires actual revenue; never infer it from conversions or average row-level rates.
