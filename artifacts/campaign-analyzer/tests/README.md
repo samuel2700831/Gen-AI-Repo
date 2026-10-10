@@ -106,6 +106,19 @@ suite. It does not require credentials or a database.
   intersection, clear filters, and the actual downloaded rows after each.
   Blank revenue stays blank and X is normalized to Twitter. Sample download
   remains the full sample after importing another dataset.
+- Native searches from `fixtures/search_campaigns.csv`: mixed case across all
+  metadata fields, literal punctuation, Unicode case folding, blank/whitespace,
+  and no-match/numeric/date queries. Accessible rendered campaign cells are
+  checked, while the other views' metrics, tables, chart traces, time-series
+  controls, and shared filters are compared before and after each search.
+- Real CSV downloads after searches and shared-filter intersections: ISO dates,
+  raw numeric values, blank revenue, and shared-filter (not search) scope.
+  Nonblank `fixtures/export_metadata.json` cases are uploaded with valid channels
+  in campaign/audience/goal columns, including quoted commas/newlines, Unicode
+  whitespace, all four formula prefixes, ordinary text, and already-escaped text.
+  Expected escaping accounts for the import's outer-whitespace normalization;
+  blank/null metadata and dangerous channels are invalid imports, not silently
+  substituted test data.
 
 Expectations are hand-authored or taken from the frozen totals fixture, never
 calculated with the application functions. Numeric cells are compared by value
@@ -114,5 +127,4 @@ There are no fixed sleeps, mocked uploads, or automatic retries. Assertion
 failures exit nonzero. Failure screenshots and Playwright traces are written to
 `generated-artifacts/campaign-browser/` at the workspace root (ignored by Git
 and deployment); successful temporary downloads are cleaned up with the
-browser context. New date-format support and search/export security edge
-cases are outside this suite's scope.
+browser context. Date-format preview behavior is covered separately.

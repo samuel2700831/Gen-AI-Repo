@@ -58,15 +58,19 @@ async function download(page: Page, label: string, filename: string): Promise<Ro
   expect(bytes.length).toBeGreaterThan(0);
   const records: string[][] = parse(bytes, { bom: true, skip_empty_lines: true });
   expect(records.shift()).toEqual(columns);
-  return records.map(values => Object.fromEntries(columns.map((column, index) => {
-    const value = values[index];
-    // Compare numeric contents, not pandas' choice of integer/float spelling.
-    if (index >= 5 && value !== "") {
-      expect(Number.isFinite(Number(value))).toBe(true);
-      return [column, String(Number(value))];
-    }
-    return [column, value];
-  })));
+  return records.map(values => {
+    expect(values).toHaveLength(columns.length);
+    return Object.fromEntries(columns.map((column, index) => {
+      const value = values[index];
+      // Compare numeric contents, not pandas' choice of integer/float spelling.
+      if (index >= 5 && value !== "") {
+        expect(value).toMatch(/^\d+(?:\.\d+)?$/);
+        expect(Number.isFinite(Number(value))).toBe(true);
+        return [column, String(Number(value))];
+      }
+      return [column, value];
+    }));
+  });
 }
 
 async function exported(page: Page): Promise<Row[]> {
@@ -79,7 +83,11 @@ async function exported(page: Page): Promise<Row[]> {
 }
 
 async function choose(page: Page, label: string, option: string) {
-  await page.getByRole("combobox", { name: label, exact: true }).click();
+  const control = page.getByRole("combobox", { name: label, exact: true });
+  await control.click();
+  // Metadata fixtures make long, virtualized option lists. Native typing
+  // brings the requested value into view without relying on list position.
+  await control.fill(option);
   await page.getByRole("option", { name: option, exact: true }).click();
   await page.keyboard.press("Escape");
 }
@@ -97,12 +105,214 @@ async function dateBoundary(page: Page, boundary: "start" | "end", month: number
   }
 }
 
+async function openView(page: Page, name: string) {
+  const tab = page.getByRole("tab", { name, exact: true });
+  await expect(tab).toHaveCount(1);
+  await tab.click();
+  await expect(tab).toHaveAttribute("aria-selected", "true");
+  return page.getByRole("tabpanel", { name, exact: true });
+}
+
+async function gridContents(page: Page) {
+  // Glide exposes its accessible table when the native canvas has focus.
+  // Read rendered cells, not React internals or seeded Streamlit state.
+  const canvas = page.getByTestId("data-grid-canvas").filter({ visible: true });
+  await expect(canvas).toHaveCount(1);
+  await canvas.focus();
+  await canvas.press("ArrowDown");
+  // Canvas fallback content is not considered visible by locator role queries.
+  const grid = canvas.getByRole("grid", { includeHidden: true });
+  await expect(grid).toHaveCount(1);
+  return {
+    count: await grid.getAttribute("aria-rowcount"),
+    headers: await grid.getByRole("columnheader", { includeHidden: true }).evaluateAll(
+      cells => cells.map(cell => cell.textContent)),
+    rows: await grid.locator("tbody tr").evaluateAll(
+      rows => rows.map(row => Array.from(row.querySelectorAll("td"), cell => cell.textContent))),
+  };
+}
+
+async function otherViews(page: Page) {
+  const views = [];
+  for (const name of ["Overview", "Platform Comparison", "Time Series"]) {
+    const panel = await openView(page, name);
+    const chart = panel.locator(".js-plotly-plot");
+    await expect(chart).toHaveCount(1);
+    const plot = await chart.evaluate(element => {
+      const figure = element as HTMLElement & {
+        data: Record<string, unknown>[];
+        layout: Record<string, unknown>;
+      };
+      // Ignore generated Plotly ids; compare the rendered trace data and titles.
+      return JSON.stringify({
+        traces: figure.data.map(({ x, y, name, type, mode }) => ({ x, y, name, type, mode })),
+        title: figure.layout.title,
+      });
+    });
+    views.push({
+      name,
+      metrics: await panel.getByTestId("stMetric").allTextContents(),
+      table: name === "Time Series" ? null : await gridContents(page),
+      plot,
+      controls: await panel.getByRole("combobox").allTextContents(),
+    });
+  }
+  return {
+    views,
+    filters: await page.getByTestId("stMultiSelectTagsContainer").allTextContents(),
+    dates: await page.getByRole("spinbutton").evaluateAll(
+      controls => controls.map(control => [control.getAttribute("aria-label"), control.getAttribute("aria-valuenow")])),
+    records: await page.getByText(/^\d+ of \d+ campaign-day records$/).textContent(),
+  };
+}
+
+function displayedSpend(value: string | null) {
+  // Glide's accessible fallback currently exposes raw numbers even when the
+  // visual column is currency-formatted. Validate either representation before
+  // parsing so "$30.75" cannot become NaN and malformed cells cannot pass.
+  expect(value).toMatch(/^(?:\d+(?:\.\d+)?|\$(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})$/);
+  return Number(value!.replace(/[$,]/g, ""));
+}
+
+async function searchFor(page: Page, query: string, expected: [string, string, number][]) {
+  const panel = await openView(page, "Campaign Details");
+  const search = panel.getByRole("textbox", { name: "Search campaigns", exact: true });
+  await expect(search).toHaveCount(1);
+  await search.fill(query);
+  await search.press("Enter");
+  await expect(search).toHaveValue(query);
+  const empty = panel.getByText("No campaign matches your search. Try another search term.", { exact: true });
+  if (expected.length === 0) {
+    await expect(empty).toBeVisible();
+    await expect(panel.getByTestId("stDataFrame")).toHaveCount(0);
+  } else {
+    await expect(empty).toHaveCount(0);
+    await expect.poll(async () => {
+      const grid = await gridContents(page);
+      expect(grid.headers.slice(0, 3)).toEqual(["Channel", "Campaign", "Spend · USD"]);
+      return { count: grid.count, rows: grid.rows.map(row => [row[0], row[1], displayedSpend(row[2])]) };
+    }).toEqual({ count: String(expected.length + 1), rows: expected });
+  }
+  await expect(panel.getByText(
+    "Export includes all campaign-day records matching the date, channel, audience, and goal filters. Campaign search only affects the table, not the CSV.",
+    { exact: true },
+  )).toBeVisible();
+}
+
+const searchImported: Row[] = [
+  ["2026-09-01", "Alpha [VIP]", "Facebook", "Students", "Sales", "10.25", "12345", "1", "20.5"],
+  ["2026-09-02", "Alpha [VIP]", "Facebook", "Returning customers", "Awareness", "20.5", "40", "2", "41"],
+  ["2026-09-03", "Dot.launch", "Instagram", "Adults (25+)", "Leads", "30.75", "60", "3", ""],
+  ["2026-09-04", "Star*sale", "Pinterest", "Students", "Sales", "0", "0", "0", "0"],
+  ["2026-09-05", "A|B", "Twitter", "Professionals", "Brand ^boost$", "40", "80", "4", "120"],
+  ["2026-09-06", "Plain control", "Facebook", "General", "Sales", "50", "100", "5", "100"],
+  ["2026-09-07", "Straße launch", "Instagram", "General", "Awareness", "60", "120", "6", "180"],
+].map(values => Object.fromEntries(columns.map((column, index) => [column, values[index]])));
+
 test.beforeEach(async ({ page }) => {
   // Each test gets a new browser context and a real, isolated Streamlit session.
   await page.goto("./");
   await expect(page.getByRole("heading", { name: "AdScope", exact: true })).toBeVisible();
   await expect(page.getByText("Current dataset: sample", { exact: true })).toBeVisible();
   await recordCount(page, 720, 720);
+});
+
+test("native literal searches change only campaign details, never other views or downloaded rows", async ({ page }) => {
+  test.setTimeout(180_000);
+  await upload(page, fileURLToPath(new URL("../fixtures/search_campaigns.csv", import.meta.url)));
+  await confirm(page, "search_campaigns.csv", 7);
+  const before = await otherViews(page);
+  const all: [string, string, number][] = [
+    ["Instagram", "Straße launch", 60], ["Facebook", "Plain control", 50],
+    ["Twitter", "A|B", 40], ["Facebook", "Alpha [VIP]", 30.75],
+    ["Instagram", "Dot.launch", 30.75], ["Pinterest", "Star*sale", 0],
+  ];
+  const cases: { query: string; rows: [string, string, number][] }[] = [
+    { query: "aLpHa", rows: [all[3]] },
+    { query: "  fAcEbOoK  ", rows: [all[1], all[3]] },
+    { query: "sTuDeNtS", rows: [["Facebook", "Alpha [VIP]", 10.25], all[5]] },
+    { query: "aWaReNeSs", rows: [all[0], ["Facebook", "Alpha [VIP]", 20.5]] },
+    { query: "[VIP]", rows: [all[3]] },
+    { query: ".", rows: [all[4]] },
+    { query: "*", rows: [all[5]] },
+    { query: "A|B", rows: [all[2]] },
+    { query: "(25+)", rows: [all[4]] },
+    { query: "^boost$", rows: [all[2]] },
+    { query: "STRASSE", rows: [all[0]] },
+    ...["not present", "12345", "2026-09-01", ".*", "\\", "[missing"].map(
+      query => ({ query, rows: [] })),
+    { query: "   ", rows: all },
+    { query: "", rows: all },
+  ];
+  for (const { query, rows } of cases) {
+    await test.step(`Search ${JSON.stringify(query)}`, async () => {
+      await searchFor(page, query, rows);
+      await recordCount(page, 7, 7);
+      expect(await exported(page)).toEqual(searchImported);
+      expect(await otherViews(page)).toEqual(before);
+    });
+  }
+});
+
+test("native downloads escape formula metadata and use shared filters rather than campaign search", async ({ page }) => {
+  test.setTimeout(120_000);
+  const cases: { input: string | null; expected: string }[] = JSON.parse(await readFile(
+    new URL("../fixtures/export_metadata.json", import.meta.url), "utf8"));
+  // Blank/null metadata cannot be imported; channel must remain a supported
+  // platform. Import trims outer whitespace before the export safety step.
+  const valid = cases.filter((item): item is { input: string; expected: string } =>
+    item.input !== null && item.input.trim() !== "");
+  const safeRows: Row[] = valid.map((item, index) => {
+    const normalizedExpected = item.expected.startsWith("'") && !item.input.trim().startsWith("'")
+      ? "'" + item.expected.slice(1).trim() : item.expected.trim();
+    return {
+      date: `2026-09-${String(index + 8).padStart(2, "0")}`,
+      campaign: normalizedExpected, channel: "Facebook",
+      audience: normalizedExpected, goal: normalizedExpected,
+      spend: "12.5", clicks: "1234567", conversions: "0", revenue: "",
+    };
+  });
+  const csvCell = (value: string) => `"${value.replaceAll('"', '""')}"`;
+  const metadataCsv = valid.map((item, index) => [
+    safeRows[index].date, item.input, "Facebook", item.input, item.input,
+    "12.5", "1234567", "0", "",
+  ].map(csvCell).join(",")).join("\n");
+  const source = await readFile(new URL("../fixtures/search_campaigns.csv", import.meta.url), "utf8");
+  await upload(page, {
+    name: "search-and-safe-metadata.csv", mimeType: "text/csv",
+    buffer: Buffer.from(source.trimEnd() + "\n" + metadataCsv + "\n"),
+  });
+  const full = [...searchImported, ...safeRows];
+  await confirm(page, "search-and-safe-metadata.csv", full.length);
+  expect(await exported(page)).toEqual(full);
+  const before = await otherViews(page);
+  await searchFor(page, "=sUm(1,2)", [["Facebook", "=SUM(1,2)", 25]]);
+  // Escaping is export-only: the UI groups two normalized unescaped campaigns.
+  expect(await exported(page)).toEqual(full);
+  expect(await otherViews(page)).toEqual(before);
+  await searchFor(page, "@sUm(a1:a2)", [["Facebook", "@SUM(A1:A2)", 25]]);
+  expect(await exported(page)).toEqual(full);
+  expect(await otherViews(page)).toEqual(before);
+
+  await choose(page, "Channel", "Facebook");
+  await choose(page, "Channel", "Pinterest");
+  await choose(page, "Audience", "Students");
+  await choose(page, "Campaign goal", "Sales");
+  await dateBoundary(page, "end", 9, 4);
+  await recordCount(page, 2, full.length);
+  const filtered = [searchImported[0], searchImported[3]];
+  const filteredViews = await otherViews(page);
+  await searchFor(page, "[vIp]", [["Facebook", "Alpha [VIP]", 10.25]]);
+  expect(await exported(page)).toEqual(filtered);
+  expect(await otherViews(page)).toEqual(filteredViews);
+  // A search can't restore Dot.launch, excluded by the shared intersection.
+  await searchFor(page, ".", []);
+  expect(await exported(page)).toEqual(filtered);
+  expect(await otherViews(page)).toEqual(filteredViews);
+  await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+  await recordCount(page, full.length, full.length);
+  await searchFor(page, "not present", []);
+  expect(await exported(page)).toEqual(full);
 });
 
 test("sample control downloads a complete, valid CSV with frozen totals", async ({ page }) => {

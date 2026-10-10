@@ -14,3 +14,9 @@ Wait for Streamlit's rerendered controls to become unique before interacting aft
 **Why:** A record-count caption can update before the old tab tree is removed, briefly exposing two identically named tabs.
 
 **How to apply:** Use retrying locator assertions for reconciliation; do not add fixed sleeps, select an arbitrary duplicate, or retry a whole failing test.
+
+Streamlit's canvas dataframe accessibility content may appear only after native focus and keyboard interaction, and browser locators classify the fallback table as hidden.
+
+**Why:** Browser-visible search regressions need to check actual rendered campaign values; an unfocused canvas gives no accessible rows, even though the table is visibly populated.
+
+**How to apply:** Activate the dataframe with native keyboard interaction and inspect its accessibility fallback, including hidden content. Check row counts as well as cells because fallback rows are virtualized.
