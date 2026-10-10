@@ -576,12 +576,13 @@ def main() -> None:
                 )
                 table = grouped.merge(meta, on=["channel", "campaign"], how="left").sort_values("spend", ascending=False)
                 st.dataframe(display_table(table), hide_index=True, width="stretch")
-                st.download_button(
-                    "Export filtered CSV",
-                    data=export_csv(filtered),
-                    file_name="adscope-filtered-campaigns.csv",
-                    mime="text/csv",
-                )
+            st.caption("Export includes all campaign-day records matching the date, channel, audience, and goal filters. Campaign search only affects the table, not the CSV.")
+            st.download_button(
+                "Export filtered CSV",
+                data=export_csv(filtered),
+                file_name="adscope-filtered-campaigns.csv",
+                mime="text/csv",
+            )
 
     with timeseries:
         st.subheader("Performance over time")

@@ -202,10 +202,43 @@ class CampaignSearchTests(unittest.TestCase):
         self.assertEqual([row["campaign"] for row in exported], ["Alpha [VIP]", "Plain control"])
         self.assertEqual([row["date"] for row in exported], ["2026-09-02", "2026-09-06"])
         self.assertEqual([float(row["spend"]) for row in exported], [20.5, 50])
+        matching_payload = calls[0].kwargs["data"]
+        scope_caption = (
+            "Export includes all campaign-day records matching the date, channel, "
+            "audience, and goal filters. Campaign search only affects the table, not the CSV."
+        )
+        self.assertIn(scope_caption, [item.value for item in app.tabs[2].caption])
         # A search cannot bring back a campaign excluded by the shared filters.
-        self.search(app, "Instagram")
+        for query in ("Instagram", "not present"):
+            with self.subTest(query=query):
+                before = self.snapshot_other_views(app)
+                with patch.object(st, "download_button", wraps=st.download_button) as download:
+                    self.search(app, query)
+                self.assertFalse(app.tabs[2].dataframe)
+                self.assertIn("No campaign matches your search", app.tabs[2].info[0].value)
+                calls = [call for call in download.call_args_list
+                         if call.args[0] == "Export filtered CSV"]
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(len(app.tabs[2].get("download_button")), 1)
+                self.assertEqual(calls[0].kwargs["data"], matching_payload)
+                self.assertEqual(calls[0].kwargs["file_name"], "adscope-filtered-campaigns.csv")
+                self.assertEqual(calls[0].kwargs["mime"], "text/csv")
+                self.assertIn(scope_caption, [item.value for item in app.tabs[2].caption])
+                self.assert_other_views_unchanged(app, before)
+
+    def test_empty_shared_filter_dataset_has_no_export(self):
+        app = self.app()
+        self.search(app, "alpha")
+        app.multiselect(key="channel_filter").set_value(["Facebook"])
+        with patch.object(st, "download_button", wraps=st.download_button) as download:
+            app.date_input[0].set_value((date(2026, 9, 3), date(2026, 9, 3))).run()
+        self.assertFalse(app.exception)
+        self.assertIn("0 of 7 campaign-day records", [item.value for item in app.caption])
         self.assertFalse(app.tabs[2].dataframe)
-        self.assertIn("No campaign matches your search", app.tabs[2].info[0].value)
+        self.assertFalse(app.tabs[2].text_input)
+        self.assertFalse(app.tabs[2].get("download_button"))
+        self.assertFalse([call for call in download.call_args_list
+                          if call.args[0] == "Export filtered CSV"])
 
     def test_download_button_receives_formula_safe_metadata_and_raw_numbers(self):
         rows = search_rows().iloc[:4].copy()
