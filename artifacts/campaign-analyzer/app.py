@@ -116,9 +116,18 @@ def interpret_dates(values: pd.Series, date_format: str) -> pd.Series:
     return parsed.where(cleaned.str.fullmatch(pattern))
 
 
-def interpreted_date_preview(values: pd.Series, date_format: str) -> pd.DataFrame:
+DATE_PREVIEW_PAGE_SIZE = 10
+
+
+def interpreted_date_preview(
+    values: pd.Series, date_format: str, page: int = 1,
+) -> pd.DataFrame:
     """Return a small, non-committing comparison without altering CSV values."""
-    sample = values.head(10)
+    page_count = max(1, (len(values) + DATE_PREVIEW_PAGE_SIZE - 1) // DATE_PREVIEW_PAGE_SIZE)
+    if page < 1 or page > page_count:
+        raise ValueError(f"Preview page must be between 1 and {page_count}.")
+    start = (page - 1) * DATE_PREVIEW_PAGE_SIZE
+    sample = values.iloc[start:start + DATE_PREVIEW_PAGE_SIZE]
     return pd.DataFrame({
         "CSV row": sample.index + 2,
         "Original date": sample,
@@ -210,6 +219,7 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
             st.session_state.pop(f"csv_mapping_{field}", None)
         # Matching headers cannot establish a new file's month/day order.
         st.session_state.pop("csv_date_format", None)
+        st.session_state.csv_date_preview_page = 1
         st.session_state.mapping_fingerprint = fingerprint
     try:
         preview = read_upload(contents)
@@ -272,15 +282,28 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
         )
         st.subheader("Review interpreted dates")
         st.caption(
-            f"Using {date_format} · showing the first 10 dates from the selected column. "
+            f"Using {date_format} · review dates from the selected column in pages of 10. "
             "Check the month/day order before importing. This preview does not change "
             "your current dataset or filters; every row is validated on confirmation."
         )
         if mapping["date"] is None:
             st.caption("Map the required Date field to see its interpreted dates.")
         else:
+            page_count = (len(preview) + DATE_PREVIEW_PAGE_SIZE - 1) // DATE_PREVIEW_PAGE_SIZE
+            page = st.number_input(
+                "Date preview page",
+                min_value=1, max_value=page_count, step=1,
+                key="csv_date_preview_page", disabled=page_count == 1,
+                help="Choose any page to inspect later CSV dates without importing.",
+            )
+            start = (page - 1) * DATE_PREVIEW_PAGE_SIZE
+            end = min(start + DATE_PREVIEW_PAGE_SIZE, len(preview))
+            st.caption(
+                f"Page {page:,} of {page_count:,} · CSV rows {start + 2:,}–{end + 1:,} "
+                f"· {len(preview):,} dates total."
+            )
             st.dataframe(
-                interpreted_date_preview(preview[mapping["date"]], date_format),
+                interpreted_date_preview(preview[mapping["date"]], date_format, page),
                 hide_index=True, width="stretch",
             )
         submitted = st.button("Import mapped CSV", width="stretch")

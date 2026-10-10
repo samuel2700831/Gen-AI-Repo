@@ -40,6 +40,22 @@ class CsvImportTests(unittest.TestCase):
                          ["2026-03-04", "Invalid date", "Invalid date", "Invalid date"])
         pd.testing.assert_series_equal(values, original)
 
+    def test_interpreted_preview_pages_preserve_positions_and_boundaries(self):
+        values = pd.Series(["03/04/2026"] * 20 + [" 05/06/2026 ", "02/30/2026", "3/04/2026"])
+        original = values.copy()
+        for page, rows in [(1, range(2, 12)), (2, range(12, 22)), (3, range(22, 25))]:
+            preview = interpreted_date_preview(values, "MM/DD/YYYY", page)
+            self.assertEqual(preview["CSV row"].tolist(), list(rows))
+            self.assertLessEqual(len(preview), 10)
+            self.assertEqual(preview["Original date"].tolist(),
+                             values.iloc[(page - 1) * 10:page * 10].tolist())
+        self.assertEqual(preview.iloc[:, 2].tolist(),
+                         ["2026-05-06", "Invalid date", "Invalid date"])
+        for page in (0, 4):
+            with self.assertRaisesRegex(ValueError, "Preview page"):
+                interpreted_date_preview(values, "MM/DD/YYYY", page)
+        pd.testing.assert_series_equal(values, original)
+
     def dated_csv(self, *dates):
         output = StringIO()
         writer = csv.writer(output)
@@ -235,6 +251,66 @@ class CsvImportTests(unittest.TestCase):
 
 
 class MappingUiTests(unittest.TestCase):
+    def test_date_preview_navigation_and_edits_never_commit(self):
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow([*CUSTOM_HEADERS, "Other date"])
+        for value in ["03/04/2026"] * 20 + [" 05/06/2026 ", "07/08/2026", "09/10/2026"]:
+            writer.writerow([value, *VALUES[1:], "11/12/2026"])
+        data = output.getvalue().encode("utf-8")
+        app = self.app(data)
+        original = app.session_state.campaign_rows.copy()
+        for field, header in MAPPING.items():
+            app.selectbox(key=f"csv_mapping_{field}").select(header)
+        app.selectbox(key="csv_date_format").select("MM/DD/YYYY").run()
+        self.assertEqual(app.number_input(key="csv_date_preview_page").value, 1)
+        for page, rows in [(2, range(12, 22)), (3, range(22, 25)), (1, range(2, 12)), (3, range(22, 25))]:
+            app.number_input(key="csv_date_preview_page").set_value(page).run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.dataframe[1].value["CSV row"].tolist(), list(rows))
+            self.assert_active_unchanged(app, original)
+        self.assertEqual(app.dataframe[1].value.iloc[0, 1], " 05/06/2026 ")
+        self.assertEqual(app.dataframe[1].value.iloc[0, 2], "2026-05-06")
+        self.assertTrue(any("Page 3 of 3 · CSV rows 22–24" in c.value for c in app.caption))
+        app.selectbox(key="csv_date_format").select("DD/MM/YYYY").run()
+        self.assertEqual(app.number_input(key="csv_date_preview_page").value, 3)
+        self.assertEqual(app.dataframe[1].value.iloc[0, 2], "2026-06-05")
+        self.assert_active_unchanged(app, original)
+        app.selectbox(key="csv_mapping_date").select("Other date").run()
+        self.assertEqual(app.dataframe[1].value.iloc[:, 2].tolist(), ["2026-12-11"] * 3)
+        self.assert_active_unchanged(app, original)
+        app.selectbox(key="csv_mapping_date").select("When").run()
+        app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(app.error)
+        self.assertEqual(len(app.session_state.campaign_rows), 23)
+        self.assertEqual(app.session_state.campaign_rows.iloc[20]["date"], pd.Timestamp("2026-06-05"))
+
+    def test_date_preview_page_resets_for_new_upload_and_session(self):
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(CUSTOM_HEADERS)
+        for _ in range(21):
+            writer.writerow(VALUES)
+        data = output.getvalue().encode("utf-8")
+        app = self.changing_app(data)
+        app.selectbox(key="csv_mapping_date").select("When").run()
+        app.number_input(key="csv_date_preview_page").set_value(3).run()
+        original = app.session_state.campaign_rows.copy()
+        self.change_upload(app, CUSTOM, "short.csv")
+        app.selectbox(key="csv_mapping_date").select("When").run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.number_input(key="csv_date_preview_page").value, 1)
+        self.assertTrue(app.number_input(key="csv_date_preview_page").disabled)
+        self.assertEqual(app.dataframe[1].value["CSV row"].tolist(), [2])
+        pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
+        self.change_upload(app, data, "long.csv")
+        app.selectbox(key="csv_mapping_date").select("When").run()
+        self.assertEqual(app.number_input(key="csv_date_preview_page").value, 1)
+        fresh = self.app(data)
+        fresh.selectbox(key="csv_mapping_date").select("When").run()
+        self.assertEqual(fresh.number_input(key="csv_date_preview_page").value, 1)
+
     def test_new_formats_preview_confirm_and_reset_for_new_upload(self):
         for date_format, value, expected in [
             ("YYYY/MM/DD", "2026/03/04", "2026-03-04"),
@@ -330,6 +406,11 @@ class MappingUiTests(unittest.TestCase):
         self.assertEqual(len(app.dataframe[1].value), 10)
         self.assertNotIn("Invalid date", app.dataframe[1].value.iloc[:, 2].tolist())
         self.assert_active_unchanged(app, original)
+        app.number_input(key="csv_date_preview_page").set_value(2).run()
+        self.assertEqual(app.dataframe[1].value["CSV row"].tolist(), [12])
+        self.assertEqual(app.dataframe[1].value.iloc[0, 2], "Invalid date")
+        self.assert_active_unchanged(app, original)
+        app.number_input(key="csv_date_preview_page").set_value(1).run()
         app.button[0].click().run()
         self.assertIn("Row 12:", app.error[0].value)
         self.assert_active_unchanged(app, original)
