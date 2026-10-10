@@ -53,6 +53,9 @@ class CsvImportTests(unittest.TestCase):
             ("YYYY-MM-DD", ("2024-02-29", "2026-09-13")),
             ("MM/DD/YYYY", ("02/29/2024", "09/13/2026")),
             ("DD/MM/YYYY", ("29/02/2024", "13/09/2026")),
+            ("YYYY/MM/DD", ("2024/02/29", "2026/09/13")),
+            ("MM-DD-YYYY", ("02-29-2024", "09-13-2026")),
+            ("DD-MM-YYYY", ("29-02-2024", "13-09-2026")),
         ]:
             with self.subTest(date_format=date_format):
                 data = self.dated_csv(*dates)
@@ -81,6 +84,28 @@ class CsvImportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MM/DD/YYYY"):
             parse_upload(self.dated_csv("13/09/2026"), MAPPING, "MM/DD/YYYY")
 
+    def test_new_formats_require_selection_and_never_guess_dash_order(self):
+        for date_format, value in [
+            ("YYYY/MM/DD", "2026/03/04"),
+            ("MM-DD-YYYY", "03-04-2026"),
+            ("DD-MM-YYYY", "03-04-2026"),
+        ]:
+            with self.subTest(date_format=date_format):
+                with self.assertRaisesRegex(ValueError, "Row 2:.*YYYY-MM-DD"):
+                    parse_upload(self.dated_csv(value), MAPPING)
+        data = self.dated_csv("03-04-2026")
+        self.assertEqual(parse_upload(data, MAPPING, "MM-DD-YYYY").iloc[0]["date"],
+                         pd.Timestamp("2026-03-04"))
+        self.assertEqual(parse_upload(data, MAPPING, "DD-MM-YYYY").iloc[0]["date"],
+                         pd.Timestamp("2026-04-03"))
+        for date_format, value in [
+            ("MM-DD-YYYY", "13-09-2026"),
+            ("DD-MM-YYYY", "09-13-2026"),
+        ]:
+            with self.subTest(date_format=date_format):
+                with self.assertRaisesRegex(ValueError, f"Row 2:.*{date_format}"):
+                    parse_upload(self.dated_csv(value), MAPPING, date_format)
+
     def test_selected_date_formats_reject_impossible_and_malformed_dates(self):
         for date_format, dates in [
             ("YYYY-MM-DD", ("2026-02-29", "2026-13-01", "2026-9-01", "2026-09-01T00:00:00")),
@@ -88,6 +113,15 @@ class CsvImportTests(unittest.TestCase):
                             "9/01/2026", "09/1/2026", "09/01/26", "09-01-2026")),
             ("DD/MM/YYYY", ("29/02/2026", "31/04/2026", "01/00/2026", "00/09/2026",
                             "1/09/2026", "01/9/2026", "01/09/26", "01-09-2026")),
+            ("YYYY/MM/DD", ("2026/02/29", "2026/04/31", "2026/00/01", "2026/09/00",
+                            "2026/9/01", "2026/09/1", "26/09/01", "2026-09-01",
+                            "2026/09-01", "2026/09/01T00:00:00")),
+            ("MM-DD-YYYY", ("02-29-2026", "04-31-2026", "00-01-2026", "09-00-2026",
+                            "9-01-2026", "09-1-2026", "09-01-26", "09/01/2026",
+                            "09-01/2026", "09-01-2026T00:00:00")),
+            ("DD-MM-YYYY", ("29-02-2026", "31-04-2026", "01-00-2026", "00-09-2026",
+                            "1-09-2026", "01-9-2026", "01-09-26", "01/09/2026",
+                            "01-09/2026", "01-09-2026T00:00:00")),
         ]:
             for value in dates:
                 with self.subTest(date_format=date_format, value=value):
@@ -104,6 +138,11 @@ class CsvImportTests(unittest.TestCase):
             ("DD/MM/YYYY", ("01/09/2026", "2026-09-02")),
             ("MM/DD/YYYY", ("09/13/2026", "14/09/2026")),
             ("DD/MM/YYYY", ("13/09/2026", "09/14/2026")),
+            ("YYYY/MM/DD", ("2026/09/01", "2026-09-02")),
+            ("MM-DD-YYYY", ("09-01-2026", "09/02/2026")),
+            ("DD-MM-YYYY", ("01-09-2026", "02/09/2026")),
+            ("MM-DD-YYYY", ("09-13-2026", "14-09-2026")),
+            ("DD-MM-YYYY", ("13-09-2026", "09-14-2026")),
         ]:
             with self.subTest(date_format=date_format), self.assertRaisesRegex(ValueError, "Row 3:"):
                 parse_upload(self.dated_csv(*dates), MAPPING, date_format)
@@ -196,6 +235,42 @@ class CsvImportTests(unittest.TestCase):
 
 
 class MappingUiTests(unittest.TestCase):
+    def test_new_formats_preview_confirm_and_reset_for_new_upload(self):
+        for date_format, value, expected in [
+            ("YYYY/MM/DD", "2026/03/04", "2026-03-04"),
+            ("MM-DD-YYYY", "03-04-2026", "2026-03-04"),
+            ("DD-MM-YYYY", "03-04-2026", "2026-04-03"),
+        ]:
+            with self.subTest(date_format=date_format):
+                data = csv_bytes(CUSTOM_HEADERS, [value, *VALUES[1:]])
+                app = self.app(data)
+                original = app.session_state.campaign_rows.copy()
+                self.assertEqual(app.selectbox(key="csv_date_format").value, "YYYY-MM-DD")
+                self.assertIn(date_format, app.selectbox(key="csv_date_format").options)
+                for field, header in MAPPING.items():
+                    app.selectbox(key=f"csv_mapping_{field}").select(header)
+                app.selectbox(key="csv_date_format").select(date_format).run()
+                self.assertFalse(app.exception)
+                self.assertEqual(app.dataframe[1].value["Original date"].tolist(), [value])
+                self.assertEqual(app.dataframe[1].value.iloc[0, 2], expected)
+                self.assert_active_unchanged(app, original)
+                app.button[0].click().run()
+                self.assertFalse(app.exception)
+                self.assertFalse(app.error)
+                self.assertEqual(app.session_state.campaign_rows.iloc[0]["date"],
+                                 pd.Timestamp(expected))
+                self.assertEqual(app.session_state.dataset_source, "custom.csv")
+                self.assertEqual(app.session_state.date_filter,
+                                 (pd.Timestamp(expected).date(),) * 2)
+                for key in ("channel_filter", "audience_filter", "goal_filter"):
+                    self.assertEqual(app.session_state[key], [])
+                app.session_state.mapping_fingerprint = "previous-file"
+                app.run()
+                self.assertEqual(app.selectbox(key="csv_date_format").value, "YYYY-MM-DD")
+                fresh = self.app(data)
+                self.assertEqual(fresh.selectbox(key="csv_date_format").value, "YYYY-MM-DD")
+                self.assertNotIn("last_successful_csv_mapping", fresh.session_state)
+
     def assert_active_unchanged(self, app, original):
         pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
         self.assertEqual(app.session_state.dataset_source, "sample")

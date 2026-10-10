@@ -8,7 +8,7 @@ A CSV-powered marketing dashboard comparing campaign spend, clicks, conversions,
 - Streamlit preview starts from `artifacts/campaign-analyzer/app.py`.
 - `uv run streamlit run artifacts/campaign-analyzer/app.py --server.port 5000` — run the dashboard locally.
 - CSV processing uses pandas in the Streamlit session; uploaded data is not saved to a database.
-- Required CSV columns: `date` (YYYY-MM-DD), `campaign`, `channel`, `audience`, `goal`, `spend`, `clicks`, `conversions`. Optional: `revenue`.
+- Required CSV columns: `date`, `campaign`, `channel`, `audience`, `goal`, `spend`, `clicks`, `conversions`. Optional: `revenue`. Dates default to YYYY-MM-DD; explicitly select MM/DD/YYYY, DD/MM/YYYY, YYYY/MM/DD, MM-DD-YYYY, or DD-MM-YYYY per upload. Every row must use the selected format with exact separators and padded month/day values.
 - Monetary inputs must use one currency (USD). File limit: 5 MB / 50,000 rows.
 - `uv run python -m unittest discover -s artifacts/campaign-analyzer -p 'test_*.py' -v` — run calculation, CSV import, and four-view Streamlit regressions. See `artifacts/campaign-analyzer/tests/README.md` for fixtures and coverage.
 - `pnpm --filter @workspace/campaign-analyzer run test:browser` — native CSV upload/download regressions against the running Streamlit web workflow through the shared proxy.

@@ -29,6 +29,9 @@ DATE_FORMATS = {
     "YYYY-MM-DD": ("%Y-%m-%d", r"[0-9]{4}-[0-9]{2}-[0-9]{2}"),
     "MM/DD/YYYY": ("%m/%d/%Y", r"[0-9]{2}/[0-9]{2}/[0-9]{4}"),
     "DD/MM/YYYY": ("%d/%m/%Y", r"[0-9]{2}/[0-9]{2}/[0-9]{4}"),
+    "YYYY/MM/DD": ("%Y/%m/%d", r"[0-9]{4}/[0-9]{2}/[0-9]{2}"),
+    "MM-DD-YYYY": ("%m-%d-%Y", r"[0-9]{2}-[0-9]{2}-[0-9]{4}"),
+    "DD-MM-YYYY": ("%d-%m-%Y", r"[0-9]{2}-[0-9]{2}-[0-9]{4}"),
 }
 
 
@@ -131,7 +134,7 @@ def validate_upload(
 ) -> pd.DataFrame:
     """Project explicitly selected columns, then apply the same strict value rules."""
     if date_format not in DATE_FORMATS:
-        raise ValueError("Unsupported date format. Choose YYYY-MM-DD, MM/DD/YYYY, or DD/MM/YYYY.")
+        raise ValueError(f"Unsupported date format. Choose one of: {', '.join(DATE_FORMATS)}.")
     unknown = set(mapping) - set(ALIASES)
     if unknown:
         raise ValueError(f"Unknown mapping fields: {', '.join(sorted(unknown))}.")
@@ -260,7 +263,9 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
             key="csv_date_format",
             help=(
                 "YYYY-MM-DD (year-month-day) is the default. "
-                "MM/DD/YYYY is month/day/year; DD/MM/YYYY is day/month/year. "
+                "YYYY/MM/DD is year/month/day. "
+                "MM/DD/YYYY and MM-DD-YYYY are month-first; "
+                "DD/MM/YYYY and DD-MM-YYYY are day-first. "
                 "Use two-digit months and days and four-digit years, with the shown separators. "
                 "Mixed formats and impossible dates are rejected. Choose again for each new file."
             ),
@@ -423,7 +428,14 @@ def main() -> None:
         with st.expander("CSV format"):
             st.write("Required columns: date, campaign, channel, audience, goal, spend, clicks, conversions.")
             st.write("Preview your CSV and map its existing headers to these fields before importing. No file renaming is needed.")
-            st.write("Revenue is optional. Dates default to YYYY-MM-DD; select MM/DD/YYYY or DD/MM/YYYY in the mapping form for other exports. Every row must use the selected format; dates are never guessed. Use non-negative amounts and whole-number click/conversion counts. All monetary data must use USD.")
+            st.write(
+                "Revenue is optional. Dates default to YYYY-MM-DD; other supported formats are "
+                f"{', '.join(list(DATE_FORMATS)[1:])}. Select your format in the mapping form. "
+                "Use four-digit years and two-digit months/days with the shown separators. "
+                "Every row must use the selected format; dates are never guessed. "
+                "Use non-negative amounts and whole-number click/conversion counts. "
+                "All monetary data must use USD."
+            )
             st.write("Channels: Facebook, Instagram, Pinterest, Twitter (X). Each row represents one campaign-day record.")
         st.divider()
 
