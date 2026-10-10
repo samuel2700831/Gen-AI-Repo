@@ -190,6 +190,17 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
         "missing metadata is not generated. Unmapped columns are ignored."
     )
     suggestions = suggest_mapping(preview)
+    # Match every original header (including ignored columns), not normalized
+    # aliases. Column order can change because mappings refer to names.
+    headers = frozenset(preview.columns)
+    saved = st.session_state.get("last_successful_csv_mapping")
+    if saved is not None and saved["headers"] == headers:
+        suggestions = saved["mapping"].copy()
+        st.info(
+            "Column choices from your last successful import are prefilled for "
+            "these matching headers. Review or edit them, then select Import mapped CSV. "
+            "Your current data stays unchanged until you confirm a valid import."
+        )
     options = [None, *preview.columns]
     mapping: dict[str, str | None] = {}
     with st.form("csv_column_mapping"):
@@ -209,6 +220,10 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
             st.error(str(exc))
             st.caption("Import failed. Your current dataset and filters are unchanged.")
             return
+        st.session_state.last_successful_csv_mapping = {
+            "headers": headers,
+            "mapping": mapping.copy(),
+        }
         st.session_state.campaign_rows = parsed
         st.session_state.dataset_source = name
         st.session_state.dataset_fingerprint = fingerprint

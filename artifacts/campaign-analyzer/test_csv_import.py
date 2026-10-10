@@ -123,6 +123,160 @@ if "campaign_rows" not in st.session_state:
 render_csv_import({contents!r}, "custom.csv", "custom")
 """).run()
 
+    def changing_app(self, contents=CUSTOM):
+        """Drive the real import form across files within one Streamlit session."""
+        path = str(Path(__file__).parent.resolve())
+        app = AppTest.from_string(f"""
+import sys
+sys.path.insert(0, {path!r})
+import streamlit as st
+from app import render_csv_import, sample_data
+if "campaign_rows" not in st.session_state:
+    st.session_state.campaign_rows = sample_data()
+    st.session_state.dataset_source = "sample"
+    st.session_state.dataset_fingerprint = "sample"
+render_csv_import(st.session_state.upload_contents, st.session_state.upload_name,
+                  st.session_state.upload_fingerprint)
+""")
+        return self.change_upload(app, contents, "first.csv")
+
+    def change_upload(self, app, contents, name):
+        app.session_state.upload_contents = contents
+        app.session_state.upload_name = name
+        app.session_state.upload_fingerprint = name
+        app.run()
+        self.assertFalse(app.exception)
+        return app
+
+    def import_custom(self, app, revenue=None):
+        for field, header in {**MAPPING, "revenue": revenue}.items():
+            widget = app.selectbox(key=f"csv_mapping_{field}")
+            if header is None:
+                # AppTest.select(None) sends no selection; select the visible
+                # first option to model choosing "Not mapped" in the browser.
+                widget.select_index(0)
+            else:
+                widget.select(header)
+        app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(app.error)
+
+    def assert_choices(self, app, mapping):
+        for field in ALIASES:
+            self.assertEqual(app.selectbox(key=f"csv_mapping_{field}").value,
+                             mapping.get(field))
+
+    def test_matching_headers_reuse_only_after_confirmation(self):
+        app = self.changing_app()
+        self.import_custom(app)
+        saved = app.session_state.last_successful_csv_mapping
+        original = app.session_state.campaign_rows.copy()
+        app.session_state.channel_filter = ["Facebook"]
+        values = VALUES.copy()
+        values[1] = "Second campaign"
+        self.change_upload(app, csv_bytes(CUSTOM_HEADERS, values), "second.csv")
+        self.assert_choices(app, MAPPING)
+        self.assertIn("last successful import", app.info[0].value)
+        self.assertEqual(app.dataframe[0].value.iloc[0]["Name"], "Second campaign")
+        pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
+        self.assertEqual(app.session_state.dataset_source, "first.csv")
+        self.assertEqual(app.session_state.channel_filter, ["Facebook"])
+        self.assertEqual(app.session_state.last_successful_csv_mapping, saved)
+        app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.session_state.dataset_source, "second.csv")
+        self.assertEqual(app.session_state.campaign_rows.iloc[0]["campaign"], "Second campaign")
+        self.assertNotIn("channel_filter", app.session_state)
+
+    def test_reordered_headers_reuse_by_name_and_preserve_optional_choice(self):
+        headers = [*CUSTOM_HEADERS, "Money"]
+        values = [*VALUES, "30"]
+        for revenue in (None, "Money"):
+            with self.subTest(revenue=revenue):
+                app = self.changing_app(csv_bytes(headers, values))
+                self.import_custom(app, revenue)
+                self.change_upload(app, csv_bytes(headers[::-1], values[::-1]), "reordered.csv")
+                self.assert_choices(app, {**MAPPING, "revenue": revenue})
+                app.button[0].click().run()
+                self.assertFalse(app.exception)
+                actual = app.session_state.campaign_rows.iloc[0]["revenue"]
+                self.assertTrue(pd.isna(actual) if revenue is None else actual == 30)
+                self.assertEqual(app.session_state.campaign_rows.iloc[0]["spend"], 10)
+
+    def test_incompatible_headers_never_reuse_saved_choices(self):
+        cases = [
+            (["when", *CUSTOM_HEADERS[1:]], VALUES),
+            ([*CUSTOM_HEADERS, "Extra"], [*VALUES, "ignored"]),
+            (CUSTOM_HEADERS[:-1], VALUES[:-1]),
+            (list(REQUIRED), VALUES),
+        ]
+        for headers, values in cases:
+            with self.subTest(headers=headers):
+                app = self.changing_app()
+                self.import_custom(app)
+                saved = app.session_state.last_successful_csv_mapping
+                self.change_upload(app, csv_bytes(headers, values), "incompatible.csv")
+                self.assert_choices(app, suggest_mapping(read_upload(csv_bytes(headers, values))))
+                self.assertFalse(app.info)
+                self.assertEqual(app.session_state.dataset_source, "first.csv")
+                self.assertEqual(app.session_state.last_successful_csv_mapping, saved)
+
+    def test_failed_reused_mapping_preserves_data_filters_and_saved_mapping(self):
+        app = self.changing_app()
+        self.import_custom(app)
+        saved = app.session_state.last_successful_csv_mapping
+        original = app.session_state.campaign_rows.copy()
+        app.session_state.goal_filter = ["Sales"]
+        values = VALUES.copy()
+        values[5] = "-10"
+        self.change_upload(app, csv_bytes(CUSTOM_HEADERS, values), "invalid.csv")
+        app.button[0].click().run()
+        self.assertIn("spend must", app.error[0].value)
+        # Editing reused defaults must still reject duplicate column assignments.
+        app.selectbox(key="csv_mapping_spend").select("Visits")
+        app.button[0].click().run()
+        self.assertIn("only one field", app.error[0].value)
+        self.assertEqual(app.session_state.last_successful_csv_mapping, saved)
+        self.assertEqual(app.session_state.dataset_source, "first.csv")
+        self.assertEqual(app.session_state.dataset_fingerprint, "first.csv")
+        self.assertEqual(app.session_state.goal_filter, ["Sales"])
+        pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
+        self.change_upload(app, CUSTOM, "retry.csv")
+        self.assert_choices(app, MAPPING)
+        # Even a malformed file must not discard the remembered successful mapping.
+        self.change_upload(app, b"a,b\n1\n", "malformed.csv")
+        self.assertTrue(app.error)
+        self.assertEqual(app.session_state.last_successful_csv_mapping, saved)
+
+    def test_successful_edits_replace_last_mapping_but_pending_edits_do_not(self):
+        headers = [*CUSTOM_HEADERS, "Money"]
+        values = [*VALUES, "30"]
+        contents = csv_bytes(headers, values)
+        app = self.changing_app(contents)
+        self.import_custom(app, "Money")
+        self.change_upload(app, contents, "pending.csv")
+        app.selectbox(key="csv_mapping_revenue").select_index(0).run()
+        self.change_upload(app, contents, "next.csv")
+        self.assert_choices(app, {**MAPPING, "revenue": "Money"})
+        app.selectbox(key="csv_mapping_revenue").select_index(0)
+        app.button[0].click().run()
+        self.change_upload(app, contents, "final.csv")
+        self.assert_choices(app, MAPPING)
+        # A successful incompatible schema replaces (rather than accumulates) mappings.
+        self.change_upload(app, csv_bytes(REQUIRED, VALUES), "canonical.csv")
+        app.button[0].click().run()
+        self.assertFalse(app.error)
+        self.change_upload(app, contents, "old-schema.csv")
+        self.assert_choices(app, suggest_mapping(read_upload(contents)))
+
+    def test_mapping_is_not_shared_with_new_session(self):
+        first = self.changing_app()
+        self.import_custom(first)
+        second = self.changing_app()
+        self.assert_choices(second, {})
+        self.assertNotIn("last_successful_csv_mapping", second.session_state)
+        self.assertFalse(second.info)
+
     def test_preview_failure_retry_and_success(self):
         app = self.app()
         original = app.session_state.campaign_rows.copy()
