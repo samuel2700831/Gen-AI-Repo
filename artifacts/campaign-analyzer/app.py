@@ -1,0 +1,421 @@
+from __future__ import annotations
+
+from datetime import date, timedelta
+from io import StringIO
+from math import sin
+from typing import Any
+
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+from plotly.subplots import make_subplots
+
+st.set_page_config(
+    page_title="AdScope · Campaign intelligence",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+CHANNELS = ("Facebook", "Instagram", "Pinterest", "Twitter")
+REQUIRED = ("date", "campaign", "channel", "audience", "goal", "spend", "clicks", "conversions")
+ALIASES = {
+    "date": ("date", "day", "report_date"),
+    "campaign": ("campaign", "campaign_name"),
+    "channel": ("channel", "platform"),
+    "audience": ("audience", "target_audience", "audience_segment"),
+    "goal": ("goal", "campaign_goal", "objective"),
+    "spend": ("spend", "cost", "ad_spend", "amount_spent"),
+    "clicks": ("clicks", "total_clicks"),
+    "conversions": ("conversions", "total_conversions"),
+    "revenue": ("revenue", "conversion_value", "sales"),
+}
+
+
+def sample_data() -> pd.DataFrame:
+    """Return the same 720-row illustrative dataset as the original dashboard."""
+    platforms = list(CHANNELS)
+    names = ["Summer collection", "Always-on retargeting", "New customer discovery"]
+    audiences = ["Adults 25–44", "Returning customers", "Adults 18–34"]
+    goals = ["Sales", "Sales", "Lead generation"]
+    rates = [0.041, 0.048, 0.033, 0.022]
+    rows: list[dict[str, Any]] = []
+    for day in range(60):
+        for platform, channel in enumerate(platforms):
+            for campaign, name in enumerate(names):
+                current_date = date(2026, 8, 1) + timedelta(days=day)
+                wave = 1 + 0.18 * sin(day / 5 + platform) + day * 0.005
+                spend = int((110 + platform * 27 + campaign * 40) * wave * 100 + 0.5) / 100
+                clicks = int(spend * (3.7 - platform * 0.45) + ((day * 19 + campaign * 11) % 47) + 0.5)
+                conversions = int(clicks * rates[platform] * (1.4 if campaign == 1 else 1) + 0.5)
+                rows.append({
+                    "date": pd.Timestamp(current_date),
+                    "campaign": name,
+                    "channel": channel,
+                    "audience": audiences[campaign],
+                    "goal": goals[campaign],
+                    "spend": spend,
+                    "clicks": clicks,
+                    "conversions": conversions,
+                    "revenue": conversions * (32 + campaign * 7),
+                })
+    return pd.DataFrame(rows)
+
+
+def parse_upload(contents: bytes) -> pd.DataFrame:
+    if len(contents) > 5 * 1024 * 1024:
+        raise ValueError("CSV must be 5 MB or smaller.")
+    try:
+        frame = pd.read_csv(StringIO(contents.decode("utf-8-sig")), dtype=str, keep_default_na=False)
+    except UnicodeDecodeError as exc:
+        raise ValueError("The CSV must use UTF-8 text encoding.") from exc
+    except Exception as exc:
+        raise ValueError(f"Could not read the CSV: {exc}") from exc
+    if frame.empty:
+        raise ValueError("CSV needs a header and at least one data row.")
+    if len(frame) > 50_000:
+        raise ValueError("CSV must contain no more than 50,000 data rows.")
+
+    frame.columns = [str(column).strip().lower().replace("-", "_").replace(" ", "_") for column in frame.columns]
+    if frame.columns.duplicated().any():
+        raise ValueError("CSV contains duplicate column names.")
+    source_columns = set(frame.columns)
+    rename: dict[str, str] = {}
+    for canonical, options in ALIASES.items():
+        match = next((option for option in options if option in source_columns), None)
+        if match:
+            rename[match] = canonical
+    frame = frame.rename(columns=rename)
+    missing = [key for key in REQUIRED if key not in frame.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}. Revenue is optional.")
+    if "revenue" not in frame.columns:
+        frame["revenue"] = ""
+
+    for column in ("date", "campaign", "channel", "audience", "goal"):
+        frame[column] = frame[column].astype(str).str.strip()
+        if frame[column].eq("").any():
+            row = int(frame.index[frame[column].eq("")][0]) + 2
+            raise ValueError(f"Row {row}: {column} cannot be blank.")
+
+    parsed_dates = pd.to_datetime(frame["date"], format="%Y-%m-%d", errors="coerce")
+    bad_dates = parsed_dates.isna()
+    if bad_dates.any():
+        raise ValueError(f"Row {int(frame.index[bad_dates][0]) + 2}: date must be a valid YYYY-MM-DD date.")
+    frame["date"] = parsed_dates
+
+    channel_map = {
+        "facebook": "Facebook", "instagram": "Instagram", "pinterest": "Pinterest",
+        "twitter": "Twitter", "x": "Twitter",
+    }
+    frame["channel"] = frame["channel"].str.lower().map(channel_map)
+    if frame["channel"].isna().any():
+        raise ValueError(f"Channel must be Facebook, Instagram, Pinterest, or Twitter (X). Invalid value on row {int(frame.index[frame['channel'].isna()][0]) + 2}.")
+
+    for column in ("spend", "clicks", "conversions", "revenue"):
+        cleaned = frame[column].astype(str).str.replace(r"[$,\s]", "", regex=True)
+        blank = cleaned.eq("")
+        if column == "revenue":
+            frame[column] = pd.to_numeric(cleaned.mask(blank), errors="coerce")
+            invalid = ~blank & frame[column].isna()
+        else:
+            frame[column] = pd.to_numeric(cleaned, errors="coerce")
+            invalid = frame[column].isna()
+        invalid |= frame[column].notna() & (frame[column] < 0)
+        if invalid.any():
+            raise ValueError(f"Row {int(frame.index[invalid][0]) + 2}: {column} must be a non-negative number.")
+        if column in ("clicks", "conversions"):
+            fractional = frame[column].notna() & (frame[column] % 1 != 0)
+            if fractional.any():
+                raise ValueError(f"Row {int(frame.index[fractional][0]) + 2}: {column} must be a whole-number count.")
+    return frame[list(REQUIRED) + ["revenue"]]
+
+
+def roi(revenue: float | None, spend: float) -> float | None:
+    if revenue is None or pd.isna(revenue) or spend <= 0:
+        return None
+    return (float(revenue) - spend) / spend * 100
+
+
+def summarize(frame: pd.DataFrame) -> dict[str, float | None]:
+    spend = float(frame["spend"].sum()) if not frame.empty else 0.0
+    clicks = int(frame["clicks"].sum()) if not frame.empty else 0
+    conversions = int(frame["conversions"].sum()) if not frame.empty else 0
+    revenue: float | None = None
+    if not frame.empty and frame["revenue"].notna().all():
+        revenue = float(frame["revenue"].sum())
+    return {
+        "spend": spend,
+        "clicks": clicks,
+        "conversions": conversions,
+        "revenue": revenue,
+        "roi": roi(revenue, spend),
+        "cpc": spend / clicks if clicks else None,
+        "cpa": spend / conversions if conversions else None,
+        "conversion_rate": conversions / clicks * 100 if clicks else None,
+    }
+
+
+def metric_label(value: float | None, kind: str) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    if kind in ("spend", "revenue", "cpa", "cpc"):
+        return f"${value:,.2f}"
+    if kind in ("roi", "conversion_rate"):
+        return f"{value:,.1f}%"
+    return f"{value:,.0f}"
+
+
+def grouped_metrics(frame: pd.DataFrame, by: str | list[str]) -> pd.DataFrame:
+    if frame.empty:
+        keys = [by] if isinstance(by, str) else by
+        return pd.DataFrame(columns=keys + ["spend", "clicks", "conversions", "revenue", "roi", "cpa"])
+    records = []
+    for value, group in frame.groupby(by, dropna=False, sort=False):
+        stats = summarize(group)
+        keys = dict(zip([by] if isinstance(by, str) else by, value if isinstance(value, tuple) else (value,)))
+        records.append({
+            **keys,
+            **stats,
+            "roi": stats["roi"],
+            "cpa": stats["cpa"],
+        })
+    return pd.DataFrame(records)
+
+
+def display_table(frame: pd.DataFrame) -> pd.DataFrame:
+    labels = {
+        "channel": "Channel", "campaign": "Campaign", "audience": "Audience", "goal": "Goal",
+        "spend": "Spend · USD", "clicks": "Clicks · count", "conversions": "Conversions · count",
+        "revenue": "Revenue · USD", "roi": "ROI · %", "cpa": "Cost per conversion · USD",
+        "cpc": "Cost per click · USD", "conversion_rate": "Conversion rate · %",
+    }
+    display = frame.copy()
+    for column in ("spend", "revenue", "cpa", "cpc"):
+        if column in display.columns:
+            display[column] = display[column].map(lambda value: metric_label(value, column))
+    for column in ("roi", "conversion_rate"):
+        if column in display.columns:
+            display[column] = display[column].map(lambda value: metric_label(value, column))
+    return display.rename(columns=labels)
+
+
+def empty_message() -> None:
+    st.info("No campaigns match these filters. Widen the date range or clear one or more filters.")
+
+
+def main() -> None:
+    st.title("AdScope")
+    st.caption("Campaign intelligence · Understand what your spend is returning.")
+
+    if "campaign_rows" not in st.session_state:
+        st.session_state.campaign_rows = sample_data()
+        st.session_state.dataset_source = "sample"
+        st.session_state.dataset_fingerprint = "sample"
+
+    with st.sidebar:
+        st.header("Campaign data")
+        uploaded = st.file_uploader("Upload campaign CSV", type=["csv"], help="Files stay in this browser session. Maximum 5 MB and 50,000 rows.")
+        if uploaded is not None:
+            fingerprint = f"{uploaded.name}:{uploaded.size}:{hash(uploaded.getvalue())}"
+            if fingerprint != st.session_state.dataset_fingerprint:
+                try:
+                    parsed = parse_upload(uploaded.getvalue())
+                    st.session_state.campaign_rows = parsed
+                    st.session_state.dataset_source = uploaded.name
+                    st.session_state.dataset_fingerprint = fingerprint
+                    st.session_state.pop("date_filter", None)
+                    st.session_state.pop("channel_filter", None)
+                    st.session_state.pop("audience_filter", None)
+                    st.session_state.pop("goal_filter", None)
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        st.download_button(
+            "Download sample CSV",
+            data=sample_data().to_csv(index=False, date_format="%Y-%m-%d"),
+            file_name="adscope-sample.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+        st.caption(f"Current dataset: {st.session_state.dataset_source}")
+        st.divider()
+
+        rows: pd.DataFrame = st.session_state.campaign_rows
+        min_date = rows["date"].min().date()
+        max_date = rows["date"].max().date()
+        picked_dates = st.date_input(
+            "Date range · inclusive",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            key="date_filter",
+        )
+        selected_channels = st.multiselect(
+            "Channel", sorted(rows["channel"].unique()), key="channel_filter",
+        )
+        selected_audiences = st.multiselect(
+            "Audience", sorted(rows["audience"].unique()), key="audience_filter",
+        )
+        selected_goals = st.multiselect(
+            "Campaign goal", sorted(rows["goal"].unique()), key="goal_filter",
+        )
+        st.caption("Currency values are interpreted as USD. CSV data remains in this session only.")
+
+    if isinstance(picked_dates, (tuple, list)) and len(picked_dates) == 2:
+        date_start, date_end = picked_dates
+    else:
+        date_start = date_end = picked_dates
+    filtered = rows[
+        (rows["date"].dt.date >= date_start)
+        & (rows["date"].dt.date <= date_end)
+    ].copy()
+    if selected_channels:
+        filtered = filtered[filtered["channel"].isin(selected_channels)]
+    if selected_audiences:
+        filtered = filtered[filtered["audience"].isin(selected_audiences)]
+    if selected_goals:
+        filtered = filtered[filtered["goal"].isin(selected_goals)]
+
+    st.caption(f"{len(filtered):,} of {len(rows):,} campaign-day records")
+    if not filtered.empty and filtered["revenue"].isna().any():
+        st.warning("Revenue and ROI are unavailable for this selection because one or more rows have missing revenue. Add complete revenue data to calculate ROI as (revenue − spend) ÷ spend.")
+    stats = summarize(filtered)
+
+    overview, platform, campaigns, timeseries = st.tabs(
+        ["Overview", "Platform Comparison", "Campaign Details", "Time Series"]
+    )
+
+    with overview:
+        st.subheader("Performance snapshot")
+        if filtered.empty:
+            empty_message()
+        else:
+            cards = st.columns(4)
+            cards[0].metric("Spend · USD", metric_label(stats["spend"], "spend"))
+            cards[1].metric("Clicks · count", metric_label(stats["clicks"], "clicks"))
+            cards[2].metric("Conversions · count", metric_label(stats["conversions"], "conversions"))
+            cards[3].metric("ROI · %", metric_label(stats["roi"], "roi"), help="(Total revenue − total spend) ÷ total spend × 100. Requires revenue on every included row.")
+
+            daily = filtered.groupby("date", as_index=False).agg(
+                spend=("spend", "sum"), conversions=("conversions", "sum")
+            )
+            figure = make_subplots(specs=[[{"secondary_y": True}]])
+            figure.add_trace(
+                go.Bar(x=daily["date"], y=daily["spend"], name="Spend · USD", marker_color="#b9613d"),
+                secondary_y=False,
+            )
+            figure.add_trace(
+                go.Scatter(x=daily["date"], y=daily["conversions"], name="Conversions · count", mode="lines+markers", line={"color": "#397a69", "width": 2.5}),
+                secondary_y=True,
+            )
+            figure.update_layout(
+                title="Spend against conversions",
+                hovermode="x unified",
+                legend={"orientation": "h", "y": 1.12},
+                margin={"t": 70, "r": 25, "b": 25, "l": 25},
+            )
+            figure.update_yaxes(title_text="Spend (USD)", rangemode="tozero", secondary_y=False)
+            figure.update_yaxes(title_text="Conversions (count)", rangemode="tozero", secondary_y=True)
+            st.plotly_chart(figure, width="stretch")
+            st.subheader("Campaign snapshot")
+            st.dataframe(
+                display_table(grouped_metrics(filtered, ["channel", "campaign"]).sort_values("spend", ascending=False).head(8)),
+                hide_index=True, width="stretch",
+            )
+
+    with platform:
+        st.subheader("Channel performance")
+        if filtered.empty:
+            empty_message()
+        else:
+            grouped = grouped_metrics(filtered, "channel").sort_values("spend", ascending=False)
+            cards = st.columns(4)
+            cards[0].metric("Total spend · USD", metric_label(stats["spend"], "spend"))
+            cards[1].metric("Total clicks · count", metric_label(stats["clicks"], "clicks"))
+            cards[2].metric("Total conversions · count", metric_label(stats["conversions"], "conversions"))
+            cards[3].metric("Total ROI · %", metric_label(stats["roi"], "roi"))
+            figure = make_subplots(rows=1, cols=2, subplot_titles=("Spend · USD", "Conversions · count"))
+            figure.add_trace(go.Bar(x=grouped["channel"], y=grouped["spend"], name="Spend (USD)", marker_color="#b9613d"), row=1, col=1)
+            figure.add_trace(go.Bar(x=grouped["channel"], y=grouped["conversions"], name="Conversions (count)", marker_color="#397a69"), row=1, col=2)
+            figure.update_yaxes(title_text="USD", rangemode="tozero", row=1, col=1)
+            figure.update_yaxes(title_text="Count", rangemode="tozero", row=1, col=2)
+            figure.update_layout(showlegend=False, margin={"t": 65, "b": 20})
+            st.plotly_chart(figure, width="stretch")
+            st.dataframe(display_table(grouped), hide_index=True, width="stretch")
+
+    with campaigns:
+        st.subheader("Campaign details")
+        if filtered.empty:
+            empty_message()
+        else:
+            search = st.text_input("Search campaigns", placeholder="Campaign, channel, audience, or goal")
+            detail = filtered.copy()
+            if search.strip():
+                needle = search.strip().casefold()
+                search_cols = detail[["campaign", "channel", "audience", "goal"]].astype(str)
+                matches = search_cols.apply(lambda col: col.str.casefold().str.contains(needle, regex=False)).any(axis=1)
+                detail = detail[matches]
+            grouped = grouped_metrics(detail, ["channel", "campaign"])
+            if grouped.empty:
+                st.info("No campaign matches your search. Try another search term.")
+            else:
+                meta = detail.groupby(["channel", "campaign"], as_index=False).agg(
+                    audiences=("audience", lambda s: ", ".join(sorted(s.unique()))),
+                    goals=("goal", lambda s: ", ".join(sorted(s.unique()))),
+                )
+                table = grouped.merge(meta, on=["channel", "campaign"], how="left").sort_values("spend", ascending=False)
+                st.dataframe(display_table(table), hide_index=True, width="stretch")
+                st.download_button(
+                    "Export filtered CSV",
+                    data=filtered.to_csv(index=False, date_format="%Y-%m-%d"),
+                    file_name="adscope-filtered-campaigns.csv",
+                    mime="text/csv",
+                )
+
+    with timeseries:
+        st.subheader("Performance over time")
+        if filtered.empty:
+            empty_message()
+        else:
+            controls = st.columns([1, 2, 3])
+            interval = controls[0].selectbox("Group by", ["Daily", "Weekly", "Monthly"])
+            metric = controls[1].selectbox(
+                "Metric",
+                ["Spend · USD", "Clicks · count", "Conversions · count", "Revenue · USD", "ROI · %"],
+            )
+            frequency = {"Daily": "D", "Weekly": "W-MON", "Monthly": "MS"}[interval]
+            value_column = {
+                "Spend · USD": "spend", "Clicks · count": "clicks",
+                "Conversions · count": "conversions", "Revenue · USD": "revenue",
+            }.get(metric)
+            if metric == "ROI · %":
+                grouped_rows = filtered.set_index("date").resample(frequency).agg(
+                    spend=("spend", "sum"), revenue=("revenue", lambda values: values.sum(min_count=len(values))),
+                ).dropna(subset=["spend"])
+                grouped_rows["value"] = grouped_rows.apply(
+                    lambda row: roi(row["revenue"], row["spend"]), axis=1
+                )
+            else:
+                assert value_column is not None
+                grouped_rows = filtered.set_index("date").resample(frequency).agg(
+                    value=(value_column, lambda values: values.sum(min_count=len(values)) if value_column == "revenue" else values.sum())
+                )
+            title, unit = metric.split(" · ")
+            figure = px.area(
+                grouped_rows.reset_index(), x="date", y="value",
+                labels={"date": "Date", "value": f"{title} ({unit})"},
+                title=f"{title} by {interval.lower()} period",
+                color_discrete_sequence=["#b9613d"],
+            )
+            figure.update_traces(hovertemplate="%{x|%b %d, %Y}<br>%{y:,.2f}<extra></extra>")
+            if metric != "ROI · %":
+                figure.update_yaxes(rangemode="tozero")
+            figure.update_layout(hovermode="x unified", margin={"t": 65, "b": 20})
+            st.plotly_chart(figure, width="stretch")
+
+    st.caption("Sample data is illustrative. All monetary values are shown in USD. ROI uses (revenue − spend) ÷ spend; it is unavailable when revenue is missing.")
+
+
+if __name__ == "__main__":
+    main()

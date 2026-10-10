@@ -5,8 +5,9 @@ A CSV-powered marketing dashboard comparing campaign spend, clicks, conversions,
 ## Run & Operate
 
 - `artifacts/campaign-analyzer: web` — managed dashboard preview workflow
-- `pnpm --filter @workspace/campaign-analyzer run typecheck` — dashboard type check
-- CSV processing is browser-only; uploads are session-only, not sent to the API server.
+- Streamlit preview starts from `artifacts/campaign-analyzer/app.py`.
+- `uv run streamlit run artifacts/campaign-analyzer/app.py --server.port 5000` — run the dashboard locally.
+- CSV processing uses pandas in the Streamlit session; uploaded data is not saved to a database.
 - Required CSV columns: `date` (YYYY-MM-DD), `campaign`, `channel`, `audience`, `goal`, `spend`, `clicks`, `conversions`. Optional: `revenue`.
 - Monetary inputs must use one currency (USD). File limit: 5 MB / 50,000 rows.
 
@@ -19,12 +20,8 @@ A CSV-powered marketing dashboard comparing campaign spend, clicks, conversions,
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.11, Streamlit, pandas, and Plotly for the campaign dashboard.
+- The surrounding workspace also contains the shared pnpm/TypeScript API scaffold; this dashboard does not depend on that API or its database.
 
 ## Where things live
 

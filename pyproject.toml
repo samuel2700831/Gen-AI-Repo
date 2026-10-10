@@ -1,0 +1,10 @@
+[project]
+name = "adscope-campaign-analyzer"
+version = "0.1.0"
+description = "CSV-powered ad campaign analytics dashboard built with Streamlit, pandas, and Plotly"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=3.0.6",
+    "plotly>=7.1.0",
+    "streamlit>=1.65.0",
+]
