@@ -1,1 +1,2 @@
 - [Marketing metric rules](marketing-metrics.md) — ROI requires actual revenue; never infer it from conversions or average row-level rates.
+- [Streamlit launch constraints](streamlit-launch.md) — artifact development runs use the app directory; headless mode prevents first-run onboarding from blocking startup.

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import csv
 from datetime import date, timedelta
 from io import StringIO
-from math import sin
+from math import isfinite, sin
 from typing import Any
 
 import pandas as pd
@@ -10,12 +11,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
-
-st.set_page_config(
-    page_title="AdScope · Campaign intelligence",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
 CHANNELS = ("Facebook", "Instagram", "Pinterest", "Twitter")
 REQUIRED = ("date", "campaign", "channel", "audience", "goal", "spend", "clicks", "conversions")
@@ -66,7 +61,16 @@ def parse_upload(contents: bytes) -> pd.DataFrame:
     if len(contents) > 5 * 1024 * 1024:
         raise ValueError("CSV must be 5 MB or smaller.")
     try:
-        frame = pd.read_csv(StringIO(contents.decode("utf-8-sig")), dtype=str, keep_default_na=False)
+        text = contents.decode("utf-8-sig")
+        records = [record for record in csv.reader(StringIO(text), strict=True) if any(cell.strip() for cell in record)]
+        if len(records) < 2:
+            raise ValueError("CSV needs a header and at least one data row.")
+        headers = [str(column).strip().lower().replace("-", "_").replace(" ", "_") for column in records[0]]
+        if len(set(headers)) != len(headers):
+            raise ValueError("CSV contains duplicate column names.")
+        if any(len(record) != len(headers) for record in records[1:]):
+            raise ValueError("Every CSV row must have the same number of columns as the header.")
+        frame = pd.DataFrame(records[1:], columns=headers)
     except UnicodeDecodeError as exc:
         raise ValueError("The CSV must use UTF-8 text encoding.") from exc
     except Exception as exc:
@@ -99,7 +103,7 @@ def parse_upload(contents: bytes) -> pd.DataFrame:
             raise ValueError(f"Row {row}: {column} cannot be blank.")
 
     parsed_dates = pd.to_datetime(frame["date"], format="%Y-%m-%d", errors="coerce")
-    bad_dates = parsed_dates.isna()
+    bad_dates = parsed_dates.isna() | ~frame["date"].str.fullmatch(r"\d{4}-\d{2}-\d{2}")
     if bad_dates.any():
         raise ValueError(f"Row {int(frame.index[bad_dates][0]) + 2}: date must be a valid YYYY-MM-DD date.")
     frame["date"] = parsed_dates
@@ -122,6 +126,7 @@ def parse_upload(contents: bytes) -> pd.DataFrame:
             frame[column] = pd.to_numeric(cleaned, errors="coerce")
             invalid = frame[column].isna()
         invalid |= frame[column].notna() & (frame[column] < 0)
+        invalid |= frame[column].notna() & frame[column].map(lambda value: not isfinite(value) or value > 9_007_199_254_740_991)
         if invalid.any():
             raise ValueError(f"Row {int(frame.index[invalid][0]) + 2}: {column} must be a non-negative number.")
         if column in ("clicks", "conversions"):
@@ -183,21 +188,34 @@ def grouped_metrics(frame: pd.DataFrame, by: str | list[str]) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def display_table(frame: pd.DataFrame) -> pd.DataFrame:
+def display_table(frame: pd.DataFrame) -> Any:
     labels = {
         "channel": "Channel", "campaign": "Campaign", "audience": "Audience", "goal": "Goal",
         "spend": "Spend · USD", "clicks": "Clicks · count", "conversions": "Conversions · count",
         "revenue": "Revenue · USD", "roi": "ROI · %", "cpa": "Cost per conversion · USD",
         "cpc": "Cost per click · USD", "conversion_rate": "Conversion rate · %",
     }
-    display = frame.copy()
-    for column in ("spend", "revenue", "cpa", "cpc"):
-        if column in display.columns:
-            display[column] = display[column].map(lambda value: metric_label(value, column))
-    for column in ("roi", "conversion_rate"):
-        if column in display.columns:
-            display[column] = display[column].map(lambda value: metric_label(value, column))
-    return display.rename(columns=labels)
+    formats = {
+        "Spend · USD": "${:,.2f}", "Revenue · USD": "${:,.2f}",
+        "Cost per conversion · USD": "${:,.2f}", "Cost per click · USD": "${:,.2f}",
+        "ROI · %": "{:,.1f}%", "Conversion rate · %": "{:,.1f}%",
+        "Clicks · count": "{:,.0f}", "Conversions · count": "{:,.0f}",
+    }
+    display = frame.rename(columns=labels)
+    return display.style.format(
+        {column: value for column, value in formats.items() if column in display.columns},
+        na_rep="N/A",
+    )
+
+
+def export_csv(frame: pd.DataFrame) -> str:
+    export = frame.copy()
+    for column in ("campaign", "channel", "audience", "goal"):
+        if column in export.columns:
+            export[column] = export[column].map(
+                lambda value: "'" + value if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")) else value
+            )
+    return export.to_csv(index=False, date_format="%Y-%m-%d")
 
 
 def empty_message() -> None:
@@ -205,6 +223,11 @@ def empty_message() -> None:
 
 
 def main() -> None:
+    st.set_page_config(
+        page_title="AdScope · Campaign intelligence",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
     st.title("AdScope")
     st.caption("Campaign intelligence · Understand what your spend is returning.")
 
@@ -215,7 +238,7 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Campaign data")
-        uploaded = st.file_uploader("Upload campaign CSV", type=["csv"], help="Files stay in this browser session. Maximum 5 MB and 50,000 rows.")
+        uploaded = st.file_uploader("Upload campaign CSV", type=["csv"], help="Processed in memory for this Streamlit session; not saved to a database. Maximum 5 MB and 50,000 rows.")
         if uploaded is not None:
             fingerprint = f"{uploaded.name}:{uploaded.size}:{hash(uploaded.getvalue())}"
             if fingerprint != st.session_state.dataset_fingerprint:
@@ -239,6 +262,10 @@ def main() -> None:
             width="stretch",
         )
         st.caption(f"Current dataset: {st.session_state.dataset_source}")
+        with st.expander("CSV format"):
+            st.write("Required columns: date, campaign, channel, audience, goal, spend, clicks, conversions.")
+            st.write("Revenue is optional. Use YYYY-MM-DD dates, non-negative amounts, and whole-number click/conversion counts. All monetary data must use USD.")
+            st.write("Channels: Facebook, Instagram, Pinterest, Twitter (X). Each row represents one campaign-day record.")
         st.divider()
 
         rows: pd.DataFrame = st.session_state.campaign_rows
@@ -260,10 +287,21 @@ def main() -> None:
         selected_goals = st.multiselect(
             "Campaign goal", sorted(rows["goal"].unique()), key="goal_filter",
         )
+        def clear_filters() -> None:
+            st.session_state.date_filter = (min_date, max_date)
+            st.session_state.channel_filter = []
+            st.session_state.audience_filter = []
+            st.session_state.goal_filter = []
+        st.button("Clear filters", on_click=clear_filters, width="stretch")
         st.caption("Currency values are interpreted as USD. CSV data remains in this session only.")
 
-    if isinstance(picked_dates, (tuple, list)) and len(picked_dates) == 2:
-        date_start, date_end = picked_dates
+    if isinstance(picked_dates, (tuple, list)):
+        if len(picked_dates) == 2:
+            date_start, date_end = picked_dates
+        elif len(picked_dates) == 1:
+            date_start = date_end = picked_dates[0]
+        else:
+            date_start, date_end = min_date, max_date
     else:
         date_start = date_end = picked_dates
     filtered = rows[
@@ -368,7 +406,7 @@ def main() -> None:
                 st.dataframe(display_table(table), hide_index=True, width="stretch")
                 st.download_button(
                     "Export filtered CSV",
-                    data=filtered.to_csv(index=False, date_format="%Y-%m-%d"),
+                    data=export_csv(filtered),
                     file_name="adscope-filtered-campaigns.csv",
                     mime="text/csv",
                 )
@@ -390,7 +428,7 @@ def main() -> None:
                 "Conversions · count": "conversions", "Revenue · USD": "revenue",
             }.get(metric)
             if metric == "ROI · %":
-                grouped_rows = filtered.set_index("date").resample(frequency).agg(
+                grouped_rows = filtered.set_index("date").resample(frequency, label="left", closed="left").agg(
                     spend=("spend", "sum"), revenue=("revenue", lambda values: values.sum(min_count=len(values))),
                 ).dropna(subset=["spend"])
                 grouped_rows["value"] = grouped_rows.apply(
@@ -398,7 +436,7 @@ def main() -> None:
                 )
             else:
                 assert value_column is not None
-                grouped_rows = filtered.set_index("date").resample(frequency).agg(
+                grouped_rows = filtered.set_index("date").resample(frequency, label="left", closed="left").agg(
                     value=(value_column, lambda values: values.sum(min_count=len(values)) if value_column == "revenue" else values.sum())
                 )
             title, unit = metric.split(" · ")

@@ -37,7 +37,7 @@ Four views: Overview, Platform Comparison, searchable Campaign Details, and Time
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- The user requires this dashboard to use Replit + Streamlit + pandas + Plotly, rather than React.
 
 ## Gotchas
 
