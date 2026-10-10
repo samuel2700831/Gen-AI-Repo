@@ -57,7 +57,12 @@ def sample_data() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def parse_upload(contents: bytes) -> pd.DataFrame:
+def normalize_header(column: str) -> str:
+    return column.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def read_upload(contents: bytes) -> pd.DataFrame:
+    """Read a CSV for preview without changing its original headers or values."""
     if len(contents) > 5 * 1024 * 1024:
         raise ValueError("CSV must be 5 MB or smaller.")
     try:
@@ -65,8 +70,11 @@ def parse_upload(contents: bytes) -> pd.DataFrame:
         records = [record for record in csv.reader(StringIO(text), strict=True) if any(cell.strip() for cell in record)]
         if len(records) < 2:
             raise ValueError("CSV needs a header and at least one data row.")
-        headers = [str(column).strip().lower().replace("-", "_").replace(" ", "_") for column in records[0]]
-        if len(set(headers)) != len(headers):
+        headers = records[0]
+        normalized = [normalize_header(column) for column in headers]
+        if any(not column for column in normalized):
+            raise ValueError("CSV column names cannot be blank.")
+        if len(set(normalized)) != len(headers):
             raise ValueError("CSV contains duplicate column names.")
         if any(len(record) != len(headers) for record in records[1:]):
             raise ValueError("Every CSV row must have the same number of columns as the header.")
@@ -80,21 +88,35 @@ def parse_upload(contents: bytes) -> pd.DataFrame:
     if len(frame) > 50_000:
         raise ValueError("CSV must contain no more than 50,000 data rows.")
 
-    frame.columns = [str(column).strip().lower().replace("-", "_").replace(" ", "_") for column in frame.columns]
-    if frame.columns.duplicated().any():
-        raise ValueError("CSV contains duplicate column names.")
-    source_columns = set(frame.columns)
-    rename: dict[str, str] = {}
+    return frame
+
+
+def suggest_mapping(frame: pd.DataFrame) -> dict[str, str | None]:
+    """Suggest only unambiguous supported aliases; do not infer export schemas."""
+    mapping: dict[str, str | None] = {}
     for canonical, options in ALIASES.items():
-        match = next((option for option in options if option in source_columns), None)
-        if match:
-            rename[match] = canonical
-    frame = frame.rename(columns=rename)
-    missing = [key for key in REQUIRED if key not in frame.columns]
+        matches = [column for column in frame.columns if normalize_header(column) in options]
+        mapping[canonical] = matches[0] if len(matches) == 1 else None
+    return mapping
+
+
+def validate_upload(frame: pd.DataFrame, mapping: dict[str, str | None]) -> pd.DataFrame:
+    """Project explicitly selected columns, then apply the same strict value rules."""
+    unknown = set(mapping) - set(ALIASES)
+    if unknown:
+        raise ValueError(f"Unknown mapping fields: {', '.join(sorted(unknown))}.")
+    missing = [key for key in REQUIRED if mapping.get(key) is None]
     if missing:
-        raise ValueError(f"Missing required columns: {', '.join(missing)}. Revenue is optional.")
-    if "revenue" not in frame.columns:
-        frame["revenue"] = ""
+        raise ValueError(f"Missing required columns: {', '.join(missing)}. Map each required field to a CSV column. Revenue is optional.")
+    selected = [column for column in mapping.values() if column is not None]
+    if any(column not in frame.columns for column in selected):
+        raise ValueError("Every mapped column must exist in the uploaded CSV.")
+    if len(set(selected)) != len(selected):
+        raise ValueError("Each CSV column can be mapped to only one field.")
+    frame = pd.DataFrame({
+        key: frame[mapping[key]].copy() if mapping.get(key) is not None else ""
+        for key in ALIASES
+    }, index=frame.index)
 
     for column in ("date", "campaign", "channel", "audience", "goal"):
         frame[column] = frame[column].astype(str).str.strip()
@@ -134,6 +156,65 @@ def parse_upload(contents: bytes) -> pd.DataFrame:
             if fractional.any():
                 raise ValueError(f"Row {int(frame.index[fractional][0]) + 2}: {column} must be a whole-number count.")
     return frame[list(REQUIRED) + ["revenue"]]
+
+
+def parse_upload(contents: bytes, mapping: dict[str, str | None] | None = None) -> pd.DataFrame:
+    frame = read_upload(contents)
+    return validate_upload(frame, suggest_mapping(frame) if mapping is None else mapping)
+
+
+def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
+    """Stage an upload; commit data and reset filters only after a valid submission."""
+    if st.session_state.get("mapping_fingerprint") != fingerprint:
+        for field in ALIASES:
+            st.session_state.pop(f"csv_mapping_{field}", None)
+        st.session_state.mapping_fingerprint = fingerprint
+    try:
+        preview = read_upload(contents)
+    except ValueError as exc:
+        st.error(str(exc))
+        st.caption("Import failed. Your current dataset and filters are unchanged.")
+        return
+
+    st.subheader("Preview and map columns")
+    st.caption(f"{len(preview):,} rows · showing the first 10 with original CSV headers.")
+    st.dataframe(preview.head(10), hide_index=True, width="stretch")
+    st.caption(
+        "Choose one CSV column per field. Recognized aliases are suggested; "
+        "unrecognized or ambiguous headers need your selection. "
+        "All amounts must be USD. Data stays in this session only."
+    )
+    st.caption(
+        "Dates must be YYYY-MM-DD; channels must be Facebook, Instagram, Pinterest, "
+        "or Twitter (X). Campaign, audience, and goal must be present in the CSV; "
+        "missing metadata is not generated. Unmapped columns are ignored."
+    )
+    suggestions = suggest_mapping(preview)
+    options = [None, *preview.columns]
+    mapping: dict[str, str | None] = {}
+    with st.form("csv_column_mapping"):
+        for field in ALIASES:
+            mapping[field] = st.selectbox(
+                f"{field.title()} {'(optional)' if field == 'revenue' else '(required)'}",
+                options,
+                index=options.index(suggestions[field]),
+                format_func=lambda value: "— Not mapped —" if value is None else value,
+                key=f"csv_mapping_{field}",
+            )
+        submitted = st.form_submit_button("Import mapped CSV", width="stretch")
+    if submitted:
+        try:
+            parsed = validate_upload(preview, mapping)
+        except ValueError as exc:
+            st.error(str(exc))
+            st.caption("Import failed. Your current dataset and filters are unchanged.")
+            return
+        st.session_state.campaign_rows = parsed
+        st.session_state.dataset_source = name
+        st.session_state.dataset_fingerprint = fingerprint
+        for key in ("date_filter", "channel_filter", "audience_filter", "goal_filter"):
+            st.session_state.pop(key, None)
+        st.rerun()
 
 
 def roi(revenue: float | None, spend: float) -> float | None:
@@ -242,18 +323,9 @@ def main() -> None:
         if uploaded is not None:
             fingerprint = f"{uploaded.name}:{uploaded.size}:{hash(uploaded.getvalue())}"
             if fingerprint != st.session_state.dataset_fingerprint:
-                try:
-                    parsed = parse_upload(uploaded.getvalue())
-                    st.session_state.campaign_rows = parsed
-                    st.session_state.dataset_source = uploaded.name
-                    st.session_state.dataset_fingerprint = fingerprint
-                    st.session_state.pop("date_filter", None)
-                    st.session_state.pop("channel_filter", None)
-                    st.session_state.pop("audience_filter", None)
-                    st.session_state.pop("goal_filter", None)
-                    st.rerun()
-                except ValueError as exc:
-                    st.error(str(exc))
+                render_csv_import(uploaded.getvalue(), uploaded.name, fingerprint)
+            else:
+                st.success(f"Imported {uploaded.name}.")
         st.download_button(
             "Download sample CSV",
             data=sample_data().to_csv(index=False, date_format="%Y-%m-%d"),
@@ -264,6 +336,7 @@ def main() -> None:
         st.caption(f"Current dataset: {st.session_state.dataset_source}")
         with st.expander("CSV format"):
             st.write("Required columns: date, campaign, channel, audience, goal, spend, clicks, conversions.")
+            st.write("Preview your CSV and map its existing headers to these fields before importing. No file renaming is needed.")
             st.write("Revenue is optional. Use YYYY-MM-DD dates, non-negative amounts, and whole-number click/conversion counts. All monetary data must use USD.")
             st.write("Channels: Facebook, Instagram, Pinterest, Twitter (X). Each row represents one campaign-day record.")
         st.divider()
