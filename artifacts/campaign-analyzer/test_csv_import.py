@@ -8,7 +8,7 @@ import unittest
 import pandas as pd
 from streamlit.testing.v1 import AppTest
 
-from app import ALIASES, REQUIRED, parse_upload, read_upload, suggest_mapping
+from app import ALIASES, DATE_FORMATS, REQUIRED, export_csv, parse_upload, read_upload, suggest_mapping
 
 
 def csv_bytes(headers, values):
@@ -26,6 +26,81 @@ MAPPING = dict(zip(REQUIRED, CUSTOM_HEADERS))
 
 
 class CsvImportTests(unittest.TestCase):
+    def dated_csv(self, *dates):
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(CUSTOM_HEADERS)
+        for value in dates:
+            writer.writerow([value, *VALUES[1:]])
+        return output.getvalue().encode("utf-8")
+
+    def test_selected_formats_normalize_to_shared_datetime_and_iso_export(self):
+        for date_format, dates in [
+            ("YYYY-MM-DD", ("2024-02-29", "2026-09-13")),
+            ("MM/DD/YYYY", ("02/29/2024", "09/13/2026")),
+            ("DD/MM/YYYY", ("29/02/2024", "13/09/2026")),
+        ]:
+            with self.subTest(date_format=date_format):
+                data = self.dated_csv(*dates)
+                preview = read_upload(data)
+                result = parse_upload(data, MAPPING, date_format)
+                self.assertEqual(preview["When"].tolist(), list(dates))
+                self.assertTrue(pd.api.types.is_datetime64_any_dtype(result["date"]))
+                self.assertEqual(result["date"].tolist(),
+                                 [pd.Timestamp("2024-02-29"), pd.Timestamp("2026-09-13")])
+                filtered = result[result["date"].dt.date >= pd.Timestamp("2026-09-01").date()]
+                self.assertEqual(len(filtered), 1)
+                self.assertIn("2026-09-13", export_csv(filtered))
+                self.assertEqual(filtered.iloc[0]["spend"], 10)
+                self.assertEqual(filtered.iloc[0]["audience"], "Adults")
+                self.assertTrue(filtered["revenue"].isna().all())
+
+    def test_ambiguous_order_requires_explicit_choice(self):
+        data = self.dated_csv("03/04/2026")
+        with self.assertRaisesRegex(ValueError, "Row 2:.*YYYY-MM-DD"):
+            parse_upload(data, MAPPING)
+        self.assertEqual(parse_upload(data, MAPPING, "MM/DD/YYYY").iloc[0]["date"],
+                         pd.Timestamp("2026-03-04"))
+        self.assertEqual(parse_upload(data, MAPPING, "DD/MM/YYYY").iloc[0]["date"],
+                         pd.Timestamp("2026-04-03"))
+        # A clearly day-first date must not trigger fallback in month-first mode.
+        with self.assertRaisesRegex(ValueError, "MM/DD/YYYY"):
+            parse_upload(self.dated_csv("13/09/2026"), MAPPING, "MM/DD/YYYY")
+
+    def test_selected_date_formats_reject_impossible_and_malformed_dates(self):
+        for date_format, dates in [
+            ("YYYY-MM-DD", ("2026-02-29", "2026-13-01", "2026-9-01", "2026-09-01T00:00:00")),
+            ("MM/DD/YYYY", ("02/29/2026", "04/31/2026", "00/01/2026", "09/00/2026",
+                            "9/01/2026", "09/1/2026", "09/01/26", "09-01-2026")),
+            ("DD/MM/YYYY", ("29/02/2026", "31/04/2026", "01/00/2026", "00/09/2026",
+                            "1/09/2026", "01/9/2026", "01/09/26", "01-09-2026")),
+        ]:
+            for value in dates:
+                with self.subTest(date_format=date_format, value=value):
+                    with self.assertRaisesRegex(ValueError, f"Row 2:.*{date_format}"):
+                        parse_upload(self.dated_csv(value), MAPPING, date_format)
+        for date_format in DATE_FORMATS:
+            with self.subTest(date_format=date_format), self.assertRaisesRegex(ValueError, "date cannot be blank"):
+                parse_upload(self.dated_csv(""), MAPPING, date_format)
+
+    def test_mixed_formats_report_first_bad_row_without_fallback(self):
+        for date_format, dates in [
+            ("YYYY-MM-DD", ("2026-09-01", "09/02/2026")),
+            ("MM/DD/YYYY", ("09/01/2026", "2026-09-02")),
+            ("DD/MM/YYYY", ("01/09/2026", "2026-09-02")),
+            ("MM/DD/YYYY", ("09/13/2026", "14/09/2026")),
+            ("DD/MM/YYYY", ("13/09/2026", "09/14/2026")),
+        ]:
+            with self.subTest(date_format=date_format), self.assertRaisesRegex(ValueError, "Row 3:"):
+                parse_upload(self.dated_csv(*dates), MAPPING, date_format)
+        with self.assertRaisesRegex(ValueError, "Unsupported date format"):
+            parse_upload(CUSTOM, MAPPING, "auto")
+
+    def test_selected_date_format_with_suggested_mapping(self):
+        data = csv_bytes(REQUIRED, ["13/09/2026", *VALUES[1:]])
+        self.assertEqual(parse_upload(data, date_format="DD/MM/YYYY").iloc[0]["date"],
+                         pd.Timestamp("2026-09-13"))
+
     def test_original_headers_and_values_are_preserved_in_preview(self):
         frame = read_upload(CUSTOM)
         self.assertEqual(list(frame.columns), CUSTOM_HEADERS)
@@ -107,6 +182,71 @@ class CsvImportTests(unittest.TestCase):
 
 
 class MappingUiTests(unittest.TestCase):
+    def test_date_format_failure_retry_and_confirmation(self):
+        data = csv_bytes(CUSTOM_HEADERS, ["03/04/2026", *VALUES[1:]])
+        app = self.app(data)
+        original = app.session_state.campaign_rows.copy()
+        self.assertEqual(app.selectbox(key="csv_date_format").value, "YYYY-MM-DD")
+        for field, header in MAPPING.items():
+            app.selectbox(key=f"csv_mapping_{field}").select(header)
+        app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertIn("YYYY-MM-DD", app.error[0].value)
+        self.assertNotIn("last_successful_csv_mapping", app.session_state)
+        self.assertEqual(app.session_state.date_filter, ["original"])
+        pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
+        app.selectbox(key="csv_date_format").select("DD/MM/YYYY")
+        # Form edits remain local until submission, just as in the browser.
+        pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
+        self.assertEqual(app.session_state.dataset_source, "sample")
+        self.assertEqual(app.session_state.date_filter, ["original"])
+        app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(app.error)
+        self.assertEqual(app.session_state.campaign_rows.iloc[0]["date"],
+                         pd.Timestamp("2026-04-03"))
+        self.assertEqual(app.session_state.dataset_source, "custom.csv")
+        self.assertEqual(app.session_state.dataset_fingerprint, "custom")
+        for key in ("date_filter", "channel_filter", "audience_filter", "goal_filter"):
+            self.assertNotIn(key, app.session_state)
+
+    def test_date_format_not_carried_to_another_file_or_session(self):
+        data = csv_bytes(CUSTOM_HEADERS, ["09/13/2026", *VALUES[1:]])
+        app = self.changing_app(data)
+        for field, header in MAPPING.items():
+            app.selectbox(key=f"csv_mapping_{field}").select(header)
+        app.selectbox(key="csv_date_format").select("MM/DD/YYYY")
+        app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(app.error)
+        saved = app.session_state.last_successful_csv_mapping
+        original = app.session_state.campaign_rows.copy()
+        app.session_state.channel_filter = ["Facebook"]
+        bad_data = csv_bytes(CUSTOM_HEADERS, ["02/30/2026", *VALUES[1:]])
+        self.change_upload(app, bad_data, "bad.csv")
+        self.assert_choices(app, MAPPING)
+        self.assertEqual(app.selectbox(key="csv_date_format").value, "YYYY-MM-DD")
+        app.selectbox(key="csv_date_format").select("MM/DD/YYYY")
+        app.button[0].click().run()
+        self.assertFalse(app.exception)
+        self.assertIn("Row 2:", app.error[0].value)
+        self.assertIn("MM/DD/YYYY", app.error[0].value)
+        self.assertEqual(app.selectbox(key="csv_date_format").value, "MM/DD/YYYY")
+        self.assertEqual(app.session_state.last_successful_csv_mapping, saved)
+        self.assertEqual(app.session_state.channel_filter, ["Facebook"])
+        self.assertEqual(app.session_state.dataset_source, "first.csv")
+        self.assertEqual(app.session_state.dataset_fingerprint, "first.csv")
+        pd.testing.assert_frame_equal(app.session_state.campaign_rows, original)
+        self.change_upload(app, CUSTOM, "iso.csv")
+        self.assertEqual(app.selectbox(key="csv_date_format").value, "YYYY-MM-DD")
+        app.button[0].click().run()
+        self.assertFalse(app.error)
+        self.assertEqual(app.session_state.campaign_rows.iloc[0]["date"],
+                         pd.Timestamp("2026-09-01"))
+        fresh = self.changing_app(data)
+        self.assertEqual(fresh.selectbox(key="csv_date_format").value, "YYYY-MM-DD")
+        self.assertNotIn("last_successful_csv_mapping", fresh.session_state)
+
     def app(self, contents=CUSTOM):
         path = str(Path(__file__).parent.resolve())
         return AppTest.from_string(f"""
@@ -281,7 +421,7 @@ render_csv_import(st.session_state.upload_contents, st.session_state.upload_name
         app = self.app()
         original = app.session_state.campaign_rows.copy()
         self.assertFalse(app.exception)
-        self.assertEqual(len(app.selectbox), len(ALIASES))
+        self.assertEqual(len(app.selectbox), len(ALIASES) + 1)
         self.assertEqual(app.dataframe[0].value.columns.tolist(), CUSTOM_HEADERS)
         app.button[0].click().run()
         self.assertIn("Missing required", app.error[0].value)

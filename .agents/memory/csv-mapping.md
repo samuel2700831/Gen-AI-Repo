@@ -14,3 +14,9 @@ Reuse only the last successful mapping in the current session, and only for the 
 **Why:** Matching normalized aliases or just mapped columns could silently carry choices into a different export schema. Pending edits and failed imports must not become trusted defaults.
 
 **How to apply:** Treat additions, removals, spelling, case, and whitespace changes as incompatible. Keep preview and confirmation even when choices are reused; never persist mappings outside session state.
+
+Reset the selected date format to ISO for every new upload, even when column mappings are reused.
+
+**Why:** Matching headers do not establish month/day order; reusing a prior format could silently reinterpret ambiguous dates.
+
+**How to apply:** Require an explicit non-ISO choice per file. Keep that choice during retries of the same file, but never infer the order from date values or a matching schema.

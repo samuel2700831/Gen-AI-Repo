@@ -25,6 +25,11 @@ ALIASES = {
     "conversions": ("conversions", "total_conversions"),
     "revenue": ("revenue", "conversion_value", "sales"),
 }
+DATE_FORMATS = {
+    "YYYY-MM-DD": ("%Y-%m-%d", r"[0-9]{4}-[0-9]{2}-[0-9]{2}"),
+    "MM/DD/YYYY": ("%m/%d/%Y", r"[0-9]{2}/[0-9]{2}/[0-9]{4}"),
+    "DD/MM/YYYY": ("%d/%m/%Y", r"[0-9]{2}/[0-9]{2}/[0-9]{4}"),
+}
 
 
 def sample_data() -> pd.DataFrame:
@@ -100,8 +105,14 @@ def suggest_mapping(frame: pd.DataFrame) -> dict[str, str | None]:
     return mapping
 
 
-def validate_upload(frame: pd.DataFrame, mapping: dict[str, str | None]) -> pd.DataFrame:
+def validate_upload(
+    frame: pd.DataFrame,
+    mapping: dict[str, str | None],
+    date_format: str = "YYYY-MM-DD",
+) -> pd.DataFrame:
     """Project explicitly selected columns, then apply the same strict value rules."""
+    if date_format not in DATE_FORMATS:
+        raise ValueError("Unsupported date format. Choose YYYY-MM-DD, MM/DD/YYYY, or DD/MM/YYYY.")
     unknown = set(mapping) - set(ALIASES)
     if unknown:
         raise ValueError(f"Unknown mapping fields: {', '.join(sorted(unknown))}.")
@@ -124,10 +135,14 @@ def validate_upload(frame: pd.DataFrame, mapping: dict[str, str | None]) -> pd.D
             row = int(frame.index[frame[column].eq("")][0]) + 2
             raise ValueError(f"Row {row}: {column} cannot be blank.")
 
-    parsed_dates = pd.to_datetime(frame["date"], format="%Y-%m-%d", errors="coerce")
-    bad_dates = parsed_dates.isna() | ~frame["date"].str.fullmatch(r"\d{4}-\d{2}-\d{2}")
+    parser_format, pattern = DATE_FORMATS[date_format]
+    parsed_dates = pd.to_datetime(frame["date"], format=parser_format, errors="coerce", exact=True)
+    bad_dates = parsed_dates.isna() | ~frame["date"].str.fullmatch(pattern)
     if bad_dates.any():
-        raise ValueError(f"Row {int(frame.index[bad_dates][0]) + 2}: date must be a valid YYYY-MM-DD date.")
+        raise ValueError(
+            f"Row {int(frame.index[bad_dates][0]) + 2}: date must be a valid {date_format} date. "
+            "Every row must use the selected format; month/day order is never guessed."
+        )
     frame["date"] = parsed_dates
 
     channel_map = {
@@ -158,9 +173,13 @@ def validate_upload(frame: pd.DataFrame, mapping: dict[str, str | None]) -> pd.D
     return frame[list(REQUIRED) + ["revenue"]]
 
 
-def parse_upload(contents: bytes, mapping: dict[str, str | None] | None = None) -> pd.DataFrame:
+def parse_upload(
+    contents: bytes,
+    mapping: dict[str, str | None] | None = None,
+    date_format: str = "YYYY-MM-DD",
+) -> pd.DataFrame:
     frame = read_upload(contents)
-    return validate_upload(frame, suggest_mapping(frame) if mapping is None else mapping)
+    return validate_upload(frame, suggest_mapping(frame) if mapping is None else mapping, date_format)
 
 
 def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
@@ -168,6 +187,8 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
     if st.session_state.get("mapping_fingerprint") != fingerprint:
         for field in ALIASES:
             st.session_state.pop(f"csv_mapping_{field}", None)
+        # Matching headers cannot establish a new file's month/day order.
+        st.session_state.pop("csv_date_format", None)
         st.session_state.mapping_fingerprint = fingerprint
     try:
         preview = read_upload(contents)
@@ -185,7 +206,8 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
         "All amounts must be USD. Data stays in this session only."
     )
     st.caption(
-        "Dates must be YYYY-MM-DD; channels must be Facebook, Instagram, Pinterest, "
+        "Choose the date format used in every row; month/day order is never guessed. "
+        "Channels must be Facebook, Instagram, Pinterest, "
         "or Twitter (X). Campaign, audience, and goal must be present in the CSV; "
         "missing metadata is not generated. Unmapped columns are ignored."
     )
@@ -212,10 +234,21 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
                 format_func=lambda value: "— Not mapped —" if value is None else value,
                 key=f"csv_mapping_{field}",
             )
+        date_format = st.selectbox(
+            "Date format",
+            list(DATE_FORMATS),
+            key="csv_date_format",
+            help=(
+                "YYYY-MM-DD (year-month-day) is the default. "
+                "MM/DD/YYYY is month/day/year; DD/MM/YYYY is day/month/year. "
+                "Use two-digit months and days and four-digit years, with the shown separators. "
+                "Mixed formats and impossible dates are rejected. Choose again for each new file."
+            ),
+        )
         submitted = st.form_submit_button("Import mapped CSV", width="stretch")
     if submitted:
         try:
-            parsed = validate_upload(preview, mapping)
+            parsed = validate_upload(preview, mapping, date_format)
         except ValueError as exc:
             st.error(str(exc))
             st.caption("Import failed. Your current dataset and filters are unchanged.")
@@ -352,7 +385,7 @@ def main() -> None:
         with st.expander("CSV format"):
             st.write("Required columns: date, campaign, channel, audience, goal, spend, clicks, conversions.")
             st.write("Preview your CSV and map its existing headers to these fields before importing. No file renaming is needed.")
-            st.write("Revenue is optional. Use YYYY-MM-DD dates, non-negative amounts, and whole-number click/conversion counts. All monetary data must use USD.")
+            st.write("Revenue is optional. Dates default to YYYY-MM-DD; select MM/DD/YYYY or DD/MM/YYYY in the mapping form for other exports. Every row must use the selected format; dates are never guessed. Use non-negative amounts and whole-number click/conversion counts. All monetary data must use USD.")
             st.write("Channels: Facebook, Instagram, Pinterest, Twitter (X). Each row represents one campaign-day record.")
         st.divider()
 
