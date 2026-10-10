@@ -21,12 +21,16 @@ async function recordCount(page: Page, shown: number, total: number) {
   await expect(page.getByText(`${shown} of ${total} campaign-day records`, { exact: true })).toBeVisible();
 }
 
-async function upload(page: Page, file: Parameters<ReturnType<Page["locator"]>["setInputFiles"]>[0]) {
+async function transfer(page: Page, file: Parameters<ReturnType<Page["locator"]>["setInputFiles"]>[0]) {
   const transport = page.waitForResponse(response =>
     response.request().method() === "PUT" && response.url().includes("/_stcore/upload_file/"));
   // This uses the native input, not AppTest/session state or an HTTP mock.
   await page.locator('input[type="file"]').setInputFiles(file);
   expect((await transport).ok()).toBe(true);
+}
+
+async function upload(page: Page, file: Parameters<ReturnType<Page["locator"]>["setInputFiles"]>[0]) {
+  await transfer(page, file);
   await expect(page.getByRole("heading", { name: "Preview and map columns", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Import mapped CSV", exact: true })).toBeVisible();
 }
@@ -170,6 +174,118 @@ test("a second native upload preserves active data until confirmed and resets ol
       goal: "Leads", spend: "8", clicks: "16", conversions: "2", revenue: "24" },
   ]);
 });
+
+for (const rejection of [
+  {
+    name: "malformed rows",
+    filename: "malformed.csv",
+    contents: `${columns.join(",")}\n2026-11-01,Missing columns\n`,
+    error: "Could not read the CSV: Every CSV row must have the same number of columns as the header.",
+    confirm: false,
+    oversized: false,
+  },
+  {
+    name: "invalid numeric data on confirmation",
+    filename: "invalid-spend.csv",
+    contents: `${columns.join(",")}\n2026-11-01,Invalid,Instagram,New audience,Awareness,-7,14,1,21\n`,
+    error: "Row 2: spend must be a non-negative number.",
+    confirm: true,
+    oversized: false,
+  },
+  {
+    name: "a file over the upload size limit",
+    filename: "oversized.csv",
+    // A well-formed CSV one byte above 5 MiB, generated in memory, not committed.
+    contents: "",
+    error: /File must be .*5.*MB or smaller\./,
+    confirm: false,
+    oversized: true,
+  },
+]) {
+  test(`rejecting ${rejection.name} preserves data and filters and allows a valid retry`, async ({ page }) => {
+    test.setTimeout(90_000);
+    await upload(page, fixture);
+    await confirm(page, "aliased_campaigns.csv", 6);
+    await choose(page, "Channel", "Facebook");
+    await recordCount(page, 3, 6);
+    await choose(page, "Audience", "Adults");
+    await choose(page, "Campaign goal", "Sales");
+    await dateBoundary(page, "start", 9, 1);
+    await dateBoundary(page, "end", 10, 1);
+    await recordCount(page, 1, 6);
+
+    async function preserved() {
+      await expect(page.getByText("Current dataset: aliased_campaigns.csv", { exact: true })).toBeVisible();
+      await recordCount(page, 1, 6);
+      for (const [label, selection] of [
+        ["Channel", "Facebook"], ["Audience", "Adults"], ["Campaign goal", "Sales"],
+      ]) {
+        const widget = page.getByTestId("stMultiSelect").filter({
+          has: page.getByRole("combobox", { name: label, exact: true }),
+        });
+        await expect(widget.getByTestId("stMultiSelectTagsContainer")).toHaveText(selection);
+      }
+      for (const [boundary, month] of [["start", 9], ["end", 10]] as const) {
+        for (const [segment, value] of [["day", 1], ["month", month], ["year", 2026]] as const) {
+          await expect(page.getByRole("spinbutton", {
+            name: `${segment}, Date range · inclusive ${boundary} date`, exact: true,
+          })).toHaveAttribute("aria-valuenow", String(value));
+        }
+      }
+      expect(await exported(page)).toEqual([imported[1]]);
+    }
+
+    await preserved();
+    const file = {
+      name: rejection.filename,
+      mimeType: "text/csv",
+      buffer: rejection.oversized
+        ? Buffer.from("campaign\n" + "A".repeat(5 * 1024 * 1024 + 1 - "campaign\n".length))
+        : Buffer.from(rejection.contents),
+    };
+    if (rejection.oversized) {
+      // Streamlit rejects this in the native uploader before any PUT happens.
+      // Do not use the transfer helper, which expects a successful transport.
+      await page.locator('input[type="file"]').setInputFiles(file);
+    } else if (rejection.confirm) {
+      await upload(page, file);
+      await page.getByRole("button", { name: "Import mapped CSV", exact: true }).click();
+    } else {
+      await transfer(page, file);
+    }
+    await expect(page.getByText(rejection.error, { exact: true })).toBeVisible();
+    if (!rejection.oversized) {
+      await expect(page.getByText(
+        "Import failed. Your current dataset and filters are unchanged.", { exact: true },
+      )).toBeVisible();
+    }
+    if (!rejection.confirm) {
+      await expect(page.getByRole("button", { name: "Import mapped CSV", exact: true })).toHaveCount(0);
+    }
+    await preserved();
+
+    // Also verify rows hidden by the active filters survived the rejection.
+    await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+    await recordCount(page, 6, 6);
+    expect(await exported(page)).toEqual(imported);
+
+    // Canonical headers differ from the initial fixture: mapping reuse is not
+    // under test. Retry in the same browser session without reload/reset.
+    await upload(page, {
+      name: "valid-retry.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from(`${columns.join(",")}\n` +
+        "2026-11-01,Valid retry,Instagram,New audience,Awareness,7,14,1,21\n"),
+    });
+    await expect(page.getByText("Current dataset: aliased_campaigns.csv", { exact: true })).toBeVisible();
+    await recordCount(page, 6, 6);
+    await confirm(page, "valid-retry.csv", 1);
+    expect(await exported(page)).toEqual([
+      { date: "2026-11-01", campaign: "Valid retry", channel: "Instagram", audience: "New audience",
+        goal: "Awareness", spend: "7", clicks: "14", conversions: "1", revenue: "21" },
+    ]);
+  });
+}
 
 test("downloaded rows follow every shared filter, their intersection, and clear filters", async ({ page }) => {
   await upload(page, fixture);
