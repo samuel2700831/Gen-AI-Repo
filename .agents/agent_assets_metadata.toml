@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "0bhrwM9qsHRRzRFu9PaWG"
+uri = "file://.local/outputs/adscope-sample.csv"
+type = "table"
+title = "AdScope sample campaign data (CSV)"
+description = "The same 720-row, four-channel sample dataset used in the dashboard, covering August 1–September 29, 2026."
+logical_id = "90fd4bc9-3dc9-4951-8916-65518f456981"
+content_hash = "sha256:40e63d19839e20c6c42b2ee706c5b8ba528c997c8fbf50e0b9b6e959549860da"
+size = 75385
+mtime_ms = 1791597300175
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:87f0efda-a4f3-49af-8dc6-e3a7e9edca47/90fd4bc9-3dc9-4951-8916-65518f456981/cc709806-ae08-4cec-91e7-a2bc8c577260"
+storage_version_token = "1791597303696270"
+content_type = "text/csv"
