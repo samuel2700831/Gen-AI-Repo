@@ -128,6 +128,119 @@ test("native alias upload stages a preview and only replaces sample data after c
   expect(await exported(page)).toEqual(imported);
 });
 
+test("concurrent browser sessions keep uploaded rows, filters, and downloads private", async ({
+  page, browser, baseURL,
+}) => {
+  test.setTimeout(120_000);
+  // Keep the fixture's context alive while opening a genuinely independent
+  // context, not another tab sharing cookies/storage or a sequential session.
+  const sampleContext = await browser.newContext({ baseURL, acceptDownloads: true });
+  try {
+    const samplePage = await sampleContext.newPage();
+    expect(samplePage.context()).not.toBe(page.context());
+    await samplePage.goto("./");
+    await expect(samplePage.getByRole("heading", { name: "AdScope", exact: true })).toBeVisible();
+    await recordCount(samplePage, 720, 720);
+    const sampleRows = await exported(samplePage);
+    expect(sampleRows).toHaveLength(720);
+    expect([...new Set(sampleRows.map(row => row.campaign))].sort()).toEqual(
+      ["Always-on retargeting", "New customer discovery", "Summer collection"]);
+    expect(sampleRows[0].date).toBe("2026-08-01");
+    expect(sampleRows.at(-1)!.date).toBe("2026-09-29");
+
+    async function sampleStillActive() {
+      await expect(samplePage.getByText("Current dataset: sample", { exact: true })).toBeVisible();
+      await expect(samplePage.getByText(
+        "Current dataset: aliased_campaigns.csv", { exact: true },
+      )).toHaveCount(0);
+      await expect(samplePage.getByRole("heading", {
+        name: "Preview and map columns", exact: true,
+      })).toHaveCount(0);
+      await expect(samplePage.getByRole("button", {
+        name: "Import mapped CSV", exact: true,
+      })).toHaveCount(0);
+    }
+
+    async function filters(
+      target: Page, selections: string[], start: number[], end: number[],
+    ) {
+      for (const [index, label] of ["Channel", "Audience", "Campaign goal"].entries()) {
+        const widget = target.getByTestId("stMultiSelect").filter({
+          has: target.getByRole("combobox", { name: label, exact: true }),
+        });
+        await expect(widget.getByTestId("stMultiSelectTagsContainer")).toHaveText(selections[index]);
+      }
+      for (const [boundary, values] of [["start", start], ["end", end]] as const) {
+        for (const [index, segment] of ["year", "month", "day"].entries()) {
+          await expect(target.getByRole("spinbutton", {
+            name: `${segment}, Date range · inclusive ${boundary} date`, exact: true,
+          })).toHaveAttribute("aria-valuenow", String(values[index]));
+        }
+      }
+    }
+
+    await upload(page, fixture);
+    await sampleStillActive();
+    await filters(samplePage, ["", "", ""], [2026, 8, 1], [2026, 9, 29]);
+    expect(await exported(samplePage)).toEqual(sampleRows);
+    await confirm(page, "aliased_campaigns.csv", 6);
+    await sampleStillActive();
+    await recordCount(samplePage, 720, 720);
+    const initialDownloads = await Promise.all([exported(page), exported(samplePage)]);
+    expect(initialDownloads).toEqual([imported, sampleRows]);
+
+    // Different selections and date ranges must survive interleaved reruns
+    // in both live sessions, including simultaneous native downloads.
+    for (const [label, uploadedSelection, sampleSelection] of [
+      ["Channel", "Facebook", "Instagram"],
+      ["Audience", "Adults", "Adults 18–34"],
+      ["Campaign goal", "Sales", "Lead generation"],
+    ]) {
+      await Promise.all([
+        choose(page, label, uploadedSelection),
+        choose(samplePage, label, sampleSelection),
+      ]);
+    }
+    await Promise.all([
+      dateBoundary(page, "start", 9, 1),
+      dateBoundary(samplePage, "start", 8, 2),
+    ]);
+    await Promise.all([
+      dateBoundary(page, "end", 10, 1),
+      dateBoundary(samplePage, "end", 9, 1),
+    ]);
+    const filteredSample = sampleRows.filter(row =>
+      row.channel === "Instagram" && row.audience === "Adults 18–34" &&
+      row.goal === "Lead generation" && row.date >= "2026-08-02" && row.date <= "2026-09-01");
+    expect(filteredSample).toHaveLength(31);
+    await recordCount(page, 1, 6);
+    await recordCount(samplePage, 31, 720);
+    await filters(page, ["Facebook", "Adults", "Sales"], [2026, 9, 1], [2026, 10, 1]);
+    await filters(samplePage, ["Instagram", "Adults 18–34", "Lead generation"],
+      [2026, 8, 2], [2026, 9, 1]);
+    expect(await Promise.all([exported(page), exported(samplePage)]))
+      .toEqual([[imported[1]], filteredSample]);
+
+    await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+    await recordCount(page, 6, 6);
+    await recordCount(samplePage, 31, 720);
+    await filters(samplePage, ["Instagram", "Adults 18–34", "Lead generation"],
+      [2026, 8, 2], [2026, 9, 1]);
+    expect(await Promise.all([exported(page), exported(samplePage)]))
+      .toEqual([imported, filteredSample]);
+
+    await samplePage.getByRole("button", { name: "Clear filters", exact: true }).click();
+    await recordCount(samplePage, 720, 720);
+    await sampleStillActive();
+    await expect(page.getByText("Current dataset: aliased_campaigns.csv", { exact: true })).toBeVisible();
+    await filters(page, ["", "", ""], [2026, 8, 31], [2026, 10, 5]);
+    await filters(samplePage, ["", "", ""], [2026, 8, 1], [2026, 9, 29]);
+    expect(await Promise.all([exported(page), exported(samplePage)])).toEqual([imported, sampleRows]);
+  } finally {
+    await sampleContext.close();
+  }
+});
+
 test("a second native upload preserves active data until confirmed and resets old filters", async ({ page }) => {
   await upload(page, fixture);
   await confirm(page, "aliased_campaigns.csv", 6);
