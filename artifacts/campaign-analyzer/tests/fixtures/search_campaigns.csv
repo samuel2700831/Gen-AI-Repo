@@ -1,0 +1,8 @@
+date,campaign,channel,audience,goal,spend,clicks,conversions,revenue
+2026-09-01,Alpha [VIP],Facebook,Students,Sales,10.25,12345,1,20.5
+2026-09-02,Alpha [VIP],Facebook,Returning customers,Awareness,20.5,40,2,41
+2026-09-03,Dot.launch,Instagram,Adults (25+),Leads,30.75,60,3,
+2026-09-04,Star*sale,Pinterest,Students,Sales,0,0,0,0
+2026-09-05,A|B,Twitter,Professionals,Brand ^boost$,40,80,4,120
+2026-09-06,Plain control,Facebook,General,Sales,50,100,5,100
+2026-09-07,Straße launch,Instagram,General,Awareness,60,120,6,180

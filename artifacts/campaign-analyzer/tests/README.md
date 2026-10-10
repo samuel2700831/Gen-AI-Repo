@@ -17,9 +17,19 @@ The Python suite uses the standard `unittest` runner and Streamlit's `AppTest`.
 No browser, API server, running Streamlit server, credentials, network access,
 or database is needed. AppTest runs the real `app.py`, uses isolated session
 state per test, and drives the actual date/multiselect/selectbox/button widgets.
-Run all three `test_*.py` modules; an exception or mismatch exits nonzero.
+Run all `test_*.py` modules; an exception or mismatch exits nonzero.
 
 ## Coverage and fixtures
+
+- `test_search_export.py`: literal, case-insensitive search across all four
+  metadata fields, whitespace/blank and no-match queries, search isolation from
+  the other views and shared filters, plus the real download button's export
+  payload. CSV checks cover ISO dates, unformatted numbers, missing revenue,
+  empty exports, every metadata formula prefix (including leading whitespace),
+  quoting/newlines, and source-data immutability. Edge cases live in
+  `fixtures/search_campaigns.csv` and `fixtures/export_metadata.json`.
+  Download-button calls are captured while running the real Streamlit widget;
+  this checks its payload, not a browser's download transport.
 
 - `test_csv_import.py`: original-header preview, automatic aliases, explicit
   mapping, ambiguous aliases, malformed/oversized CSVs, invalid dates/counts/
