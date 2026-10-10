@@ -260,8 +260,13 @@ def render_csv_import(contents: bytes, name: str, fingerprint: str) -> None:
         st.session_state.campaign_rows = parsed
         st.session_state.dataset_source = name
         st.session_state.dataset_fingerprint = fingerprint
-        for key in ("date_filter", "channel_filter", "audience_filter", "goal_filter"):
-            st.session_state.pop(key, None)
+        # Explicit values update the browser's existing widgets too. Deleting
+        # keys resets Python defaults but can leave keyed frontend controls stale.
+        st.session_state.date_filter = (
+            parsed["date"].min().date(), parsed["date"].max().date()
+        )
+        for key in ("channel_filter", "audience_filter", "goal_filter"):
+            st.session_state[key] = []
         st.rerun()
 
 
@@ -392,9 +397,10 @@ def main() -> None:
         rows: pd.DataFrame = st.session_state.campaign_rows
         min_date = rows["date"].min().date()
         max_date = rows["date"].max().date()
+        if "date_filter" not in st.session_state:
+            st.session_state.date_filter = (min_date, max_date)
         picked_dates = st.date_input(
             "Date range · inclusive",
-            value=(min_date, max_date),
             min_value=min_date,
             max_value=max_date,
             key="date_filter",

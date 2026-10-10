@@ -20,6 +20,10 @@ author = "agent"
 task = "workflow.run"
 args = "campaign-regressions"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "campaign-browser-regressions"
+
 [[workflows.workflow]]
 name = "campaign-regressions"
 author = "agent"
@@ -27,6 +31,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "uv run python -m unittest discover -s artifacts/campaign-analyzer -p 'test_*.py' -v"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "campaign-browser-regressions"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/campaign-analyzer run typecheck:browser && pnpm --filter @workspace/campaign-analyzer run test:browser"
 
 [workflows.workflow.metadata]
 isValidation = true

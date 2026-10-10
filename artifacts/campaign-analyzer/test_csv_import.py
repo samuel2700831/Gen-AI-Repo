@@ -207,8 +207,10 @@ class MappingUiTests(unittest.TestCase):
                          pd.Timestamp("2026-04-03"))
         self.assertEqual(app.session_state.dataset_source, "custom.csv")
         self.assertEqual(app.session_state.dataset_fingerprint, "custom")
-        for key in ("date_filter", "channel_filter", "audience_filter", "goal_filter"):
-            self.assertNotIn(key, app.session_state)
+        self.assertEqual(app.session_state.date_filter,
+                         (pd.Timestamp("2026-04-03").date(),) * 2)
+        for key in ("channel_filter", "audience_filter", "goal_filter"):
+            self.assertEqual(app.session_state[key], [])
 
     def test_date_format_not_carried_to_another_file_or_session(self):
         data = csv_bytes(CUSTOM_HEADERS, ["09/13/2026", *VALUES[1:]])
@@ -326,7 +328,7 @@ render_csv_import(st.session_state.upload_contents, st.session_state.upload_name
         self.assertFalse(app.exception)
         self.assertEqual(app.session_state.dataset_source, "second.csv")
         self.assertEqual(app.session_state.campaign_rows.iloc[0]["campaign"], "Second campaign")
-        self.assertNotIn("channel_filter", app.session_state)
+        self.assertEqual(app.session_state.channel_filter, [])
 
     def test_reordered_headers_reuse_by_name_and_preserve_optional_choice(self):
         headers = [*CUSTOM_HEADERS, "Money"]
@@ -436,8 +438,10 @@ render_csv_import(st.session_state.upload_contents, st.session_state.upload_name
         self.assertEqual(app.session_state.dataset_fingerprint, "custom")
         self.assertEqual(len(app.session_state.campaign_rows), 1)
         self.assertTrue(app.session_state.campaign_rows["revenue"].isna().all())
-        for key in ("date_filter", "channel_filter", "audience_filter", "goal_filter"):
-            self.assertNotIn(key, app.session_state)
+        self.assertEqual(app.session_state.date_filter,
+                         (pd.Timestamp("2026-09-01").date(),) * 2)
+        for key in ("channel_filter", "audience_filter", "goal_filter"):
+            self.assertEqual(app.session_state[key], [])
 
     def test_bad_values_keep_current_data_and_choices(self):
         values = VALUES.copy()
