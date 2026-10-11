@@ -2,3 +2,4 @@
 - [Streamlit launch constraints](streamlit-launch.md) — artifact development runs use the app directory; headless mode prevents first-run onboarding from blocking startup.
 - [CSV mapping decisions](csv-mapping.md) — ambiguous aliases require a choice; imports are explicitly confirmed before replacing session data.
 - [Streamlit browser state](streamlit-browser-state.md) — verify visible keyed filter resets as well as backend state; wait for control reconciliation after reruns.
+- [Git provider authentication](git-provider-auth.md) — native Git-provider connections differ from app connectors; generic reconnect cards may not support them.
