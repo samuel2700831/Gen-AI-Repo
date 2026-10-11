@@ -887,6 +887,111 @@ test("unsafe dataframe exports are unavailable while tables and safe CSV exports
   }
 });
 
+for (const view of ["Overview", "Platform Comparison"]) {
+  test(`Plotly controls cannot expose spreadsheet exports in ${view}, including fullscreen`, async ({ page }) => {
+    test.setTimeout(120_000);
+    const cases: { input: string | null; expected: string }[] = JSON.parse(await readFile(
+      new URL("../fixtures/export_metadata.json", import.meta.url), "utf8"));
+    const valid = cases.filter((item): item is { input: string; expected: string } =>
+      item.input !== null && item.input.trim() !== "");
+    const csvCell = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    const dates = valid.map((_, index) => `2026-09-${String(index + 1).padStart(2, "0")}`);
+    const body = valid.map((item, index) => [
+      dates[index], item.input, "Facebook", item.input, item.input, "12.5", "10", "1", "30",
+    ].map(csvCell).join(",")).join("\n");
+    // Channels must be valid imports. Formula-like campaign/audience/goal
+    // values exercise the export boundary without creating rejected fixtures.
+    await upload(page, {
+      name: "chart-metadata.csv", mimeType: "text/csv",
+      buffer: Buffer.from(columns.join(",") + "\n" + body + "\n"),
+    });
+    await confirm(page, "chart-metadata.csv", valid.length);
+    const panel = await openView(page, view);
+    const chart = panel.getByTestId("stPlotlyChart");
+    const plot = chart.locator(".js-plotly-plot");
+    const expectedTraces = view === "Overview" ? [
+      { type: "bar", x: dates, y: dates.map(() => 12.5) },
+      { type: "scatter", x: dates, y: dates.map(() => 1) },
+    ] : [
+      { type: "bar", x: ["Facebook"], y: [valid.length * 12.5] },
+      { type: "bar", x: ["Facebook"], y: [valid.length] },
+    ];
+    async function presentation() {
+      await expect(plot).toBeVisible();
+      // Wait for rendered, decoded values, not the previous sample's traces.
+      await expect.poll(() => plot.evaluate(element => {
+        const figure = element as HTMLElement & {
+          _fullData: { type: string; x: string[]; y: ArrayLike<number> }[];
+        };
+        return figure._fullData.map(trace => ({
+          type: trace.type,
+          x: Array.from(trace.x, value => value.slice(0, 10)),
+          y: Array.from(trace.y),
+        }));
+      })).toEqual(expectedTraces);
+      if (view === "Overview") {
+        await expect(plot.locator(".gtitle")).toHaveText("Spend against conversions");
+      } else {
+        await expect(plot.locator(".annotation-text")).toHaveText(["Spend · USD", "Conversions · count"]);
+      }
+    }
+    async function controls(fullscreen: boolean) {
+      // Audit: these app.py Plotly charts have no Show data/table menus in
+      // Streamlit 1.65. Hover exposes the native modebar; an explicit allowlist
+      // fails if an upgrade adds a menu or CSV/copy affordance. Do not silently
+      // skip an absent menu: future table controls require a native-open audit.
+      await chart.hover();
+      await expect(chart.getByRole("button")).toHaveCount(8);
+      await expect.poll(() => chart.getByRole("button").evaluateAll(
+        buttons => buttons.map(button => button.getAttribute("aria-label")),
+      )).toEqual([
+        "Download plot as a PNG", "Zoom", "Pan", "Zoom in", "Zoom out",
+        "Autoscale", "Reset axes", fullscreen ? "Close fullscreen" : "Fullscreen",
+      ]);
+      await expect(chart.getByRole("menuitem")).toHaveCount(0);
+      await expect(chart.getByRole("link")).toHaveCount(0);
+      await expect(chart.getByRole("button", { name: /show data|table|csv|copy|clipboard|export/i })).toHaveCount(0);
+      await expect(chart.getByTestId("stDataFrame")).toHaveCount(0);
+      await expect(chart.getByRole("table")).toHaveCount(0);
+      await expect(chart.getByRole("grid")).toHaveCount(0);
+    }
+    await presentation();
+    await controls(false);
+    // Exercise real navigation and both native modebar states, not React
+    // internals or synthetic handler calls.
+    await chart.getByRole("button", { name: "Zoom in", exact: true }).click();
+    await chart.getByRole("button", { name: "Reset axes", exact: true }).click();
+    await presentation();
+    await chart.getByRole("button", { name: "Fullscreen", exact: true }).click();
+    await controls(true);
+    await presentation();
+    await chart.getByRole("button", { name: "Close fullscreen", exact: true }).click();
+    await controls(false);
+    await presentation();
+
+    // Image export is intentionally allowed and remains a genuine PNG, not a
+    // spreadsheet download hidden behind an image-labelled control.
+    const imageEvent = page.waitForEvent("download");
+    await chart.getByRole("button", { name: "Download plot as a PNG", exact: true }).click();
+    const image = await imageEvent;
+    expect(image.suggestedFilename()).toMatch(/\.png$/);
+    expect(await image.failure()).toBeNull();
+    const imagePath = await image.path();
+    expect(imagePath).not.toBeNull();
+    expect((await readFile(imagePath!)).subarray(0, 8))
+      .toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+
+    expect(await exported(page)).toEqual(valid.map((item, index) => {
+      const value = item.expected.startsWith("'") && !item.input.trim().startsWith("'")
+        ? "'" + item.expected.slice(1).trim() : item.expected.trim();
+      return {
+        date: dates[index], campaign: value, channel: "Facebook", audience: value, goal: value,
+        spend: "12.5", clicks: "10", conversions: "1", revenue: "30",
+      };
+    }));
+  });
+}
+
 for (const view of ["Overview", "Campaign Details"]) {
   test(`native keyboard copy cannot export metadata from ${view}, but navigation and safe CSV work`, async ({
     page, context,
