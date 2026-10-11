@@ -38,3 +38,15 @@ Compare Plotly's resolved render traces rather than assuming input traces contai
 **Why:** Plotly can keep base64 numeric descriptors in its input data while the resolved traces contain decoded arrays. Streamlit also adds HTML formatting to titles; those tags are not the displayed wording.
 
 **How to apply:** Read the decoded arrays from the rendered chart, preserve unavailable values as null, and compare title text without formatting. Wait for chart values and canvas row counts, not just import captions or selected controls.
+
+Keep the pointer inside a Streamlit dataframe when testing native keyboard selection, and expect focus to move into the selected accessible cell.
+
+**Why:** Streamlit gates cell-selection updates on its pointer-in-grid state, even when the canvas has keyboard focus. Imports from sidebar controls can leave that gate closed. Glide also virtualizes columns horizontally, so off-screen headers are absent until navigation reveals them.
+
+**How to apply:** Hover the dataframe before keyboard navigation, assert the selected cell and its native focus before copying, and return to the first column after replacement imports before comparing virtualized content.
+
+Prove native clipboard access works before asserting that a table cannot copy.
+
+**Why:** An unchanged clipboard alone can be a false positive if browser permissions or keyboard targeting are broken.
+
+**How to apply:** Use a native text-control copy as a positive control, then seed and read the real browser clipboard around native table copy. Do not replace clipboard APIs with mocks.

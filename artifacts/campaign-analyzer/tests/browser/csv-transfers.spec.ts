@@ -887,6 +887,135 @@ test("unsafe dataframe exports are unavailable while tables and safe CSV exports
   }
 });
 
+for (const view of ["Overview", "Campaign Details"]) {
+  test(`native keyboard copy cannot export metadata from ${view}, but navigation and safe CSV work`, async ({
+    page, context,
+  }) => {
+    test.setTimeout(120_000);
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    // Positive control: prove the real browser clipboard and native shortcut
+    // work, rather than passing because Chromium refused clipboard access.
+    const sentinel = "AdScope clipboard positive control";
+    await page.evaluate(() => {
+      const control = document.createElement("textarea");
+      control.id = "clipboard-positive-control";
+      document.body.append(control);
+    });
+    const control = page.locator("#clipboard-positive-control");
+    await control.fill(sentinel);
+    await control.press("ControlOrMeta+a");
+    await control.press("ControlOrMeta+c");
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(sentinel);
+    await control.evaluate(element => element.remove());
+
+    const cases: { input: string | null; expected: string }[] = JSON.parse(await readFile(
+      new URL("../fixtures/export_metadata.json", import.meta.url), "utf8"));
+    const valid = cases.filter((item): item is { input: string; expected: string } =>
+      item.input !== null && item.input.trim() !== "");
+    const csvCell = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    // Keep every grouped row inside the snapshot limit and accessible window.
+    // Formula channels are invalid imports; use a real supported channel.
+    for (let offset = 0; offset < valid.length; offset += 4) {
+      const batch = valid.slice(offset, offset + 4);
+      const body = batch.map((item, index) => [
+        `2026-09-${String(index + 1).padStart(2, "0")}`,
+        item.input, "Facebook", item.input, item.input, "12.5", "10", "1", "30",
+      ].map(csvCell).join(",")).join("\n");
+      await upload(page, {
+        name: "clipboard-metadata.csv", mimeType: "text/csv",
+        buffer: Buffer.from(columns.join(",") + "\n" + body + "\n"),
+      });
+      await confirm(page, "clipboard-metadata.csv", batch.length);
+      const panel = await openView(page, view);
+      const table = panel.getByTestId("stDataFrame");
+      // Streamlit accepts cell-selection changes only while the pointer is
+      // inside the grid (keyboard focus alone is not sufficient).
+      await table.hover();
+      const canvas = panel.getByTestId("data-grid-canvas").filter({ visible: true });
+      const grid = canvas.getByRole("grid", { includeHidden: true });
+      const selected = grid.locator('td[aria-selected="true"]');
+      await canvas.focus();
+      await canvas.press("ArrowDown");
+      await expect(selected).toHaveCount(1);
+      // A replacement import can retain the previous horizontal scroll.
+      // Return to the first column before comparing virtualized campaign cells.
+      await page.keyboard.press("ControlOrMeta+Home");
+      await expect(selected).toHaveAttribute("id", "glide-cell-0-0");
+      const campaigns = [...new Set(batch.map(item => item.input.trim()))].sort();
+      await expect.poll(async () => {
+        const contents = await gridContents(page, panel);
+        const index = contents.headers.indexOf("Campaign");
+        return contents.rows.map(row => row[index]).sort();
+      }).toEqual(campaigns);
+      const metadata = view === "Overview" ? [["Campaign", 1] as const] :
+        [["Campaign", 1], ["audiences", 10], ["goals", 11]] as const;
+      const rows = await grid.locator("tbody tr").count();
+
+      for (let row = 0; row < rows; row++) {
+        await page.keyboard.press("ControlOrMeta+Home");
+        await expect(selected).toHaveAttribute("id", "glide-cell-0-0");
+        for (let index = 0; index < row; index++) {
+          await page.keyboard.press("ArrowDown");
+          await expect(selected).toHaveAttribute("id", `glide-cell-0-${index + 1}`);
+        }
+        for (const [field, column] of metadata) {
+          await test.step(`${field}, batch ${offset / 4 + 1}, row ${row + 1}`, async () => {
+            // Native navigation, not a hidden fallback-cell click or React state.
+            if (field === "audiences") {
+              // End moves to the last column without changing the row.
+              await page.keyboard.press("End");
+              await expect(selected).toHaveAttribute("id", `glide-cell-11-${row}`);
+              await page.keyboard.press("ArrowLeft");
+            } else {
+              await page.keyboard.press("ArrowRight");
+            }
+            const cellId = `glide-cell-${column}-${row}`;
+            await expect(selected).toHaveAttribute("id", cellId);
+            // Metadata columns to the right are virtualized until navigation
+            // brings them into view. Assert the rendered header, not its array
+            // position in the initially visible subset.
+            await expect(grid.locator(`th[aria-colindex="${column + 1}"]`)).toHaveText(field);
+            const raw = await selected.textContent();
+            expect(campaigns).toContain(raw);
+            await expect(selected).toHaveAttribute("aria-readonly", "true");
+            // Glide moves native focus into its accessible selected cell.
+            await expect(selected).toBeFocused();
+
+            const marker = `${sentinel}: ${view}/${offset}/${row}/${field}`;
+            await page.evaluate(value => navigator.clipboard.writeText(value), marker);
+            await page.keyboard.press("ControlOrMeta+c");
+            // A subsequent native move and reconciled selection ensure the copy
+            // handler had a chance to run. Reading alone must not race it.
+            await page.keyboard.press("ArrowLeft");
+            await expect(selected).toHaveAttribute("id", `glide-cell-${column - 1}-${row}`);
+            expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(marker);
+            await page.keyboard.press("ArrowRight");
+            await expect(selected).toHaveAttribute("id", cellId);
+            await expect(selected).toHaveText(raw!);
+          });
+        }
+      }
+
+      const downloaded = await exported(page);
+      expect(downloaded).toEqual(batch.map((item, index) => {
+        // Import strips outer whitespace; escaping occurs only in the CSV.
+        const value = item.expected.startsWith("'") && !item.input.trim().startsWith("'")
+          ? "'" + item.expected.slice(1).trim() : item.expected.trim();
+        return {
+          date: `2026-09-${String(index + 1).padStart(2, "0")}`,
+          campaign: value, channel: "Facebook", audience: value, goal: value,
+          spend: "12.5", clicks: "10", conversions: "1", revenue: "30",
+        };
+      }));
+      for (const row of downloaded) {
+        for (const field of ["campaign", "channel", "audience", "goal"]) {
+          expect(row[field].trimStart()).not.toMatch(/^[=+\-@]/);
+        }
+      }
+    }
+  });
+}
+
 test("sample control downloads a complete, valid CSV with frozen totals", async ({ page }) => {
   const rows = await download(page, "Download sample CSV", "adscope-sample.csv");
   const totals = JSON.parse(await readFile(
