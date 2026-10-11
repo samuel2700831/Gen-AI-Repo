@@ -111,6 +111,14 @@ suite. It does not require credentials or a database.
   and no-match/numeric/date queries. Accessible rendered campaign cells are
   checked, while the other views' metrics, tables, chart traces, time-series
   controls, and shared filters are compared before and after each search.
+- Native Group by and Metric selectboxes after uploading
+  `fixtures/aliased_campaigns.csv`: all five metrics for Daily, Weekly, and
+  Monthly periods, rendered Plotly trace values, chart/axis labels, zero-filled
+  gap periods, Monday/month boundaries, weighted ROI, and null revenue/ROI.
+  Monthly revenue and weekly ROI are recomputed after shared-filter changes
+  and clearing filters without resetting the visible choices. A native upload
+  of the same fixture without its optional revenue column checks unavailable
+  revenue/ROI alongside unchanged spend/click/conversion totals.
 - Real CSV downloads after searches and shared-filter intersections: ISO dates,
   raw numeric values, blank revenue, and shared-filter (not search) scope.
   Nonblank `fixtures/export_metadata.json` cases are uploaded with valid channels

@@ -32,3 +32,9 @@ Keep fixture batches small when comparing every canvas-accessibility row.
 **Why:** Even seven short records exceeded the visible accessibility window at the browser regression viewport. The reported total row count includes records absent from the fallback DOM.
 
 **How to apply:** Use batches small enough for all expected rows to render, or navigate and collect virtualized rows explicitly; never equate the visible fallback with the full dataset.
+
+Compare Plotly's resolved render traces rather than assuming input traces contain numeric arrays.
+
+**Why:** Plotly can keep base64 numeric descriptors in its input data while the resolved traces contain decoded arrays. Streamlit also adds HTML formatting to titles; those tags are not the displayed wording.
+
+**How to apply:** Read the decoded arrays from the rendered chart, preserve unavailable values as null, and compare title text without formatting. Wait for chart values and canvas row counts, not just import captions or selected controls.

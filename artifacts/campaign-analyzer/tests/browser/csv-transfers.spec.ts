@@ -113,6 +113,109 @@ async function openView(page: Page, name: string) {
   return page.getByRole("tabpanel", { name, exact: true });
 }
 
+type Interval = "Daily" | "Weekly" | "Monthly";
+const seriesMetrics = ["Spend · USD", "Clicks · count", "Conversions · count", "Revenue · USD", "ROI · %"] as const;
+type SeriesMetric = typeof seriesMetrics[number];
+type Bucket = [number, number, number, number | null, number | null];
+
+// Golden totals from the six calculation records, including empty periods.
+// No app calculation, exported result, or chart output supplies these oracles.
+const dailyDates = [
+  "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05",
+  "2026-09-06", "2026-09-07", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11",
+  "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17",
+  "2026-09-18", "2026-09-19", "2026-09-20", "2026-09-21", "2026-09-22", "2026-09-23",
+  "2026-09-24", "2026-09-25", "2026-09-26", "2026-09-27", "2026-09-28", "2026-09-29",
+  "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05",
+];
+const dailyRecords: Record<string, Bucket> = {
+  "2026-08-31": [10, 10, 1, 30, 200],
+  "2026-09-01": [90, 30, 9, 90, 0],
+  "2026-09-06": [20, 20, 2, 40, 100],
+  "2026-09-07": [0, 0, 0, 0, null],
+  "2026-10-01": [50, 25, 5, null, null],
+  "2026-10-05": [100, 50, 10, 300, 200],
+};
+const seriesGolden: Record<Interval, { dates: string[]; buckets: Bucket[] }> = {
+  Daily: {
+    dates: dailyDates,
+    buckets: dailyDates.map(date => dailyRecords[date] ?? [0, 0, 0, 0, null]),
+  },
+  Weekly: {
+    dates: ["2026-08-31", "2026-09-07", "2026-09-14", "2026-09-21", "2026-09-28", "2026-10-05"],
+    buckets: [
+      [120, 60, 12, 160, 100 / 3], [0, 0, 0, 0, null],
+      [0, 0, 0, 0, null], [0, 0, 0, 0, null],
+      [50, 25, 5, null, null], [100, 50, 10, 300, 200],
+    ],
+  },
+  Monthly: {
+    dates: ["2026-08-01", "2026-09-01", "2026-10-01"],
+    buckets: [[10, 10, 1, 30, 200], [110, 50, 11, 130, 200 / 11], [150, 75, 15, null, null]],
+  },
+};
+
+async function selectSeries(page: Page, label: "Group by" | "Metric", value: string) {
+  const panel = await openView(page, "Time Series");
+  const widget = panel.getByTestId("stSelectbox").filter({
+    has: page.getByText(label, { exact: true }),
+  });
+  await expect(widget).toHaveCount(1);
+  await widget.getByRole("combobox").click();
+  await page.getByRole("option", { name: value, exact: true }).click();
+  await expect(widget.getByRole("combobox")).toHaveValue(value);
+}
+
+async function assertSeries(
+  page: Page, interval: Interval, metric: SeriesMetric,
+  dates: string[], values: (number | null)[],
+) {
+  const panel = await openView(page, "Time Series");
+  for (const [label, value] of [["Group by", interval], ["Metric", metric]]) {
+    const widget = panel.getByTestId("stSelectbox").filter({
+      has: page.getByText(label, { exact: true }),
+    });
+    await expect(widget).toHaveCount(1);
+    await expect(widget.getByRole("combobox")).toHaveValue(value);
+  }
+  const chart = panel.locator(".js-plotly-plot");
+  await expect(chart).toHaveCount(1);
+  const [title, unit] = metric.split(" · ");
+  // Poll the actual rendered Plotly trace through Streamlit's asynchronous rerun.
+  // Do not mistake a changed selectbox for a finished chart update.
+  await expect.poll(async () => {
+    const rendered = await chart.evaluate(element => {
+      const figure = element as HTMLElement & {
+        _fullData: { x: string[]; y: ArrayLike<number | null>; type: string; mode: string }[];
+        layout: { title: { text: string }; xaxis: { title: { text: string } }; yaxis: { title: { text: string } } };
+      };
+      // Plotly's resolved render traces contain decoded numeric arrays; input
+      // data can still contain the transport's base64 typed-array descriptors.
+      const trace = figure._fullData[0];
+      // Streamlit's Plotly theme adds bold HTML around the title. Compare the
+      // displayed wording, not the theme's nested formatting tags.
+      const titleText = document.createElement("div");
+      titleText.innerHTML = figure.layout.title.text;
+      return {
+        traces: figure._fullData.length,
+        dates: Array.from(trace.x, value => value.slice(0, 10)),
+        values: Array.from(trace.y, value =>
+          value === null || Number.isNaN(value) ? null : Number(value.toFixed(8))),
+        type: trace.type, mode: trace.mode,
+        title: titleText.textContent,
+        xLabel: figure.layout.xaxis.title.text,
+        yLabel: figure.layout.yaxis.title.text,
+      };
+    });
+    return rendered;
+  }).toEqual({
+    traces: 1, dates, type: "scatter", mode: "lines",
+    title: `${title} by ${interval.toLowerCase()} period`,
+    xLabel: "Date", yLabel: `${title} (${unit})`,
+    values: values.map(value => value === null ? null : Number(value.toFixed(8))),
+  });
+}
+
 async function gridContents(page: Page, scope: Page | Locator = page) {
   // Glide exposes its accessible table when the native canvas has focus.
   // Read rendered cells, not React internals or seeded Streamlit state.
@@ -215,6 +318,96 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByRole("heading", { name: "AdScope", exact: true })).toBeVisible();
   await expect(page.getByText("Current dataset: sample", { exact: true })).toBeVisible();
   await recordCount(page, 720, 720);
+});
+
+for (const interval of ["Daily", "Weekly", "Monthly"] as const) {
+  test(`native time-series controls render golden ${interval.toLowerCase()} totals for every metric`, async ({ page }) => {
+    await upload(page, fixture);
+    await confirm(page, "aliased_campaigns.csv", 6);
+    await expect(page.getByTestId("stAlert").filter({ hasText: "missing revenue" })).toBeVisible();
+    await selectSeries(page, "Group by", interval);
+    const { dates, buckets } = seriesGolden[interval];
+    for (const [index, metric] of seriesMetrics.entries()) {
+      await selectSeries(page, "Metric", metric);
+      await assertSeries(page, interval, metric, dates, buckets.map(bucket => bucket[index]));
+    }
+  });
+}
+
+test("shared filters recompute monthly revenue without resetting visible time-series choices", async ({ page }) => {
+  await upload(page, fixture);
+  await confirm(page, "aliased_campaigns.csv", 6);
+  await selectSeries(page, "Group by", "Monthly");
+  await selectSeries(page, "Metric", "Revenue · USD");
+  const allDates = seriesGolden.Monthly.dates;
+  await assertSeries(page, "Monthly", "Revenue · USD", allDates, [30, 130, null]);
+  for (const { label, option, count, dates, values, missing } of [
+    { label: "Channel", option: "Facebook", count: 3, dates: allDates, values: [30, 90, 300], missing: false },
+    { label: "Audience", option: "Students", count: 2, dates: allDates.slice(1), values: [40, null], missing: true },
+    { label: "Campaign goal", option: "Sales", count: 4, dates: allDates, values: [30, 90, 300], missing: false },
+  ]) {
+    await choose(page, label, option);
+    await recordCount(page, count, 6);
+    await assertSeries(page, "Monthly", "Revenue · USD", dates, values);
+    await expect(page.getByTestId("stAlert").filter({ hasText: "missing revenue" })).toHaveCount(missing ? 1 : 0);
+    await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+    await recordCount(page, 6, 6);
+    await assertSeries(page, "Monthly", "Revenue · USD", allDates, [30, 130, null]);
+  }
+  await dateBoundary(page, "start", 9, 1);
+  await dateBoundary(page, "end", 10, 1);
+  await recordCount(page, 4, 6);
+  await assertSeries(page, "Monthly", "Revenue · USD", allDates.slice(1), [130, null]);
+  await choose(page, "Audience", "Adults");
+  await recordCount(page, 2, 6);
+  await assertSeries(page, "Monthly", "Revenue · USD", ["2026-09-01"], [90]);
+  await choose(page, "Campaign goal", "Sales");
+  await choose(page, "Channel", "Facebook");
+  await recordCount(page, 1, 6);
+  await assertSeries(page, "Monthly", "Revenue · USD", ["2026-09-01"], [90]);
+  await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+  await recordCount(page, 6, 6);
+  await assertSeries(page, "Monthly", "Revenue · USD", allDates, [30, 130, null]);
+});
+
+test("weekly ROI remains selected as filters remove missing revenue or select zero spend", async ({ page }) => {
+  await upload(page, fixture);
+  await confirm(page, "aliased_campaigns.csv", 6);
+  await selectSeries(page, "Group by", "Weekly");
+  await selectSeries(page, "Metric", "ROI · %");
+  const { dates, buckets } = seriesGolden.Weekly;
+  for (const { channel, count, wantedDates, values, missing } of [
+    { channel: "Facebook", count: 3, wantedDates: dates, values: [20, null, null, null, null, 200], missing: false },
+    { channel: "Twitter", count: 1, wantedDates: ["2026-09-28"], values: [null], missing: true },
+    { channel: "Pinterest", count: 1, wantedDates: ["2026-09-07"], values: [null], missing: false },
+  ]) {
+    await choose(page, "Channel", channel);
+    await recordCount(page, count, 6);
+    await assertSeries(page, "Weekly", "ROI · %", wantedDates, values);
+    await expect(page.getByTestId("stAlert").filter({ hasText: "missing revenue" })).toHaveCount(missing ? 1 : 0);
+    await page.getByRole("button", { name: "Clear filters", exact: true }).click();
+    await recordCount(page, 6, 6);
+    await assertSeries(page, "Weekly", "ROI · %", dates, buckets.map(bucket => bucket[4]));
+  }
+});
+
+test("native upload without a revenue column leaves revenue and ROI gaps but preserves count and spend series", async ({ page }) => {
+  const source = await readFile(fixture, "utf8");
+  // Use the documented calculation fixture, omitting its optional revenue field.
+  const rows: string[][] = parse(source, { skip_empty_lines: true });
+  await upload(page, {
+    name: "no-revenue.csv", mimeType: "text/csv",
+    buffer: Buffer.from(rows.map(row => row.slice(0, -1).join(",")).join("\n")),
+  });
+  await confirm(page, "no-revenue.csv", 6);
+  await expect(page.getByTestId("stAlert").filter({ hasText: "missing revenue" })).toBeVisible();
+  await selectSeries(page, "Group by", "Monthly");
+  const { dates, buckets } = seriesGolden.Monthly;
+  for (const [index, metric] of seriesMetrics.entries()) {
+    await selectSeries(page, "Metric", metric);
+    await assertSeries(page, "Monthly", metric, dates,
+      index >= 3 ? [null, null, null] : buckets.map(bucket => bucket[index]));
+  }
 });
 
 test("ambiguous date previews rerender for format and column edits before importing the latest review", async ({ page }) => {
@@ -419,8 +612,11 @@ test("unsafe dataframe exports are unavailable while tables and safe CSV exports
         await expect(table.getByRole("button", {
           name: "Download as CSV", exact: true,
         })).toHaveCount(0);
+        // Import confirmation can arrive before the canvas finishes updating.
+        // Wait for the expected native grid, not the previous sample's rows.
+        await expect.poll(async () => (await gridContents(page, panel)).count)
+          .toBe(String((name === "Platform Comparison" ? 1 : campaigns.length) + 1));
         const grid = await gridContents(page, panel);
-        expect(grid.count).toBe(String((name === "Platform Comparison" ? 1 : campaigns.length) + 1));
         for (const row of grid.rows) {
           const campaignIndex = grid.headers.indexOf("Campaign");
           const groupSize = campaignIndex < 0 ? batch.length :
