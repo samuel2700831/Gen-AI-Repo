@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { parse } from "csv-parse/sync";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const fixture = fileURLToPath(new URL("../fixtures/aliased_campaigns.csv", import.meta.url));
 const columns = ["date", "campaign", "channel", "audience", "goal", "spend", "clicks", "conversions", "revenue"];
@@ -113,10 +113,10 @@ async function openView(page: Page, name: string) {
   return page.getByRole("tabpanel", { name, exact: true });
 }
 
-async function gridContents(page: Page) {
+async function gridContents(page: Page, scope: Page | Locator = page) {
   // Glide exposes its accessible table when the native canvas has focus.
   // Read rendered cells, not React internals or seeded Streamlit state.
-  const canvas = page.getByTestId("data-grid-canvas").filter({ visible: true });
+  const canvas = scope.getByTestId("data-grid-canvas").filter({ visible: true });
   await expect(canvas).toHaveCount(1);
   await canvas.focus();
   await canvas.press("ArrowDown");
@@ -215,6 +215,72 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByRole("heading", { name: "AdScope", exact: true })).toBeVisible();
   await expect(page.getByText("Current dataset: sample", { exact: true })).toBeVisible();
   await recordCount(page, 720, 720);
+});
+
+test("ambiguous date previews rerender for format and column edits before importing the latest review", async ({ page }) => {
+  await upload(page, fileURLToPath(new URL("../fixtures/ambiguous_dates.csv", import.meta.url)));
+  const sidebar = page.getByTestId("stSidebar");
+  const format = sidebar.getByRole("combobox", { name: "Date format", exact: true });
+  const mapping = sidebar.getByRole("combobox", { name: "Date (required)", exact: true });
+
+  async function select(control: Locator, option: string) {
+    await expect(control).toHaveCount(1);
+    await control.click();
+    // Search the native dropdown so later/virtualized source columns are reachable.
+    await control.fill(option);
+    await control.press("ArrowDown");
+    await page.getByRole("option", { name: option, exact: true }).click();
+  }
+
+  async function reviewed(dateFormat: string, source: string, rows: string[][]) {
+    await expect(format).toHaveValue(dateFormat);
+    await expect(mapping).toHaveValue(source);
+    await expect(sidebar.getByText(
+      `Using ${dateFormat} · review dates from the selected column in pages of 10. ` +
+      "Check the month/day order before importing. This preview does not change " +
+      "your current dataset or filters; every row is validated on confirmation.",
+      { exact: true },
+    )).toBeVisible();
+    const tables = sidebar.getByTestId("stDataFrame");
+    // The first table is the raw CSV; the second is the visible date comparison.
+    await expect(tables).toHaveCount(2);
+    await expect(tables.nth(1)).toBeVisible();
+    await expect.poll(async () => gridContents(page, tables.nth(1))).toEqual({
+      count: "3",
+      headers: ["CSV row", "Original date", "Interpreted date (YYYY-MM-DD)"],
+      rows,
+    });
+    await expect(page.getByText("Current dataset: sample", { exact: true })).toBeVisible();
+    await recordCount(page, 720, 720);
+    await expect(sidebar.getByRole("button", { name: "Import mapped CSV", exact: true })).toBeEnabled();
+  }
+
+  // Each assertion reads the browser-rendered comparison, not Python state.
+  await select(format, "MM/DD/YYYY");
+  await reviewed("MM/DD/YYYY", "date", [
+    ["2", "03/04/2026", "2026-03-04"],
+    ["3", "05/06/2026", "2026-05-06"],
+  ]);
+  await select(format, "DD/MM/YYYY");
+  await reviewed("DD/MM/YYYY", "date", [
+    ["2", "03/04/2026", "2026-04-03"],
+    ["3", "05/06/2026", "2026-06-05"],
+  ]);
+  await select(mapping, "Other date");
+  await reviewed("DD/MM/YYYY", "Other date", [
+    ["2", "07/08/2026", "2026-08-07"],
+    ["3", "09/10/2026", "2026-10-09"],
+  ]);
+
+  await confirm(page, "ambiguous_dates.csv", 2);
+  // Full native-download contents prove confirmation used both latest choices,
+  // rather than the initial mapping or the previously reviewed month-first dates.
+  expect(await exported(page)).toEqual([
+    { date: "2026-08-07", campaign: "Ambiguous A", channel: "Facebook", audience: "Adults",
+      goal: "Sales", spend: "10", clicks: "20", conversions: "2", revenue: "30" },
+    { date: "2026-10-09", campaign: "Ambiguous B", channel: "Instagram", audience: "Students",
+      goal: "Leads", spend: "15", clicks: "30", conversions: "3", revenue: "45" },
+  ]);
 });
 
 test("native literal searches change only campaign details, never other views or downloaded rows", async ({ page }) => {
