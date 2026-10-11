@@ -410,6 +410,116 @@ test("native upload without a revenue column leaves revenue and ROI gaps but pre
   }
 });
 
+test("reordered matching headers prefill saved choices but allow edits before a later import", async ({ page }) => {
+  const headers = ["When", "Name", "Network", "Segment", "Purpose", "Budget", "Visits", "Results", "Money", "Other date"];
+  const sources = headers.slice(0, columns.length);
+  const sidebar = page.getByTestId("stSidebar");
+  const notice = sidebar.getByText(
+    "Column choices from your last successful import are prefilled for " +
+    "these matching headers. Review or edit them, then select Import mapped CSV. " +
+    "Your current data stays unchanged until you confirm a valid import.",
+    { exact: true },
+  );
+  const format = sidebar.getByRole("combobox", { name: "Date format", exact: true });
+  const dateMapping = sidebar.getByRole("combobox", { name: "Date (required)", exact: true });
+
+  async function select(label: string, option: string) {
+    const control = sidebar.getByRole("combobox", { name: label, exact: true });
+    await expect(control).toHaveCount(1);
+    await control.click();
+    await control.fill(option);
+    await control.press("ArrowDown");
+    await page.getByRole("option", { name: option, exact: true }).click();
+    await expect(control).toHaveValue(option);
+  }
+
+  async function choices(expectedSources: string[]) {
+    for (const [index, field] of columns.entries()) {
+      const label = `${field[0].toUpperCase()}${field.slice(1)} ` +
+        (field === "revenue" ? "(optional)" : "(required)");
+      const control = sidebar.getByRole("combobox", { name: label, exact: true });
+      await expect(control).toHaveCount(1);
+      await expect(control).toBeVisible();
+      await expect(control).toHaveValue(expectedSources[index]);
+    }
+  }
+
+  async function review(source: string, rows: string[][]) {
+    await expect(dateMapping).toHaveValue(source);
+    await expect(format).toHaveValue("YYYY-MM-DD");
+    await expect(sidebar.getByText(
+      "Using YYYY-MM-DD · review dates from the selected column in pages of 10. " +
+      "Check the month/day order before importing. This preview does not change " +
+      "your current dataset or filters; every row is validated on confirmation.",
+      { exact: true },
+    )).toBeVisible();
+    const tables = sidebar.getByTestId("stDataFrame");
+    await expect(tables).toHaveCount(2);
+    await expect(tables.nth(1)).toBeVisible();
+    await expect.poll(async () => gridContents(page, tables.nth(1))).toEqual({
+      count: "3",
+      headers: ["CSV row", "Original date", "Interpreted date (YYYY-MM-DD)"],
+      rows,
+    });
+    await expect(sidebar.getByRole("button", { name: "Import mapped CSV", exact: true })).toBeEnabled();
+  }
+
+  await upload(page, {
+    name: "custom-first.csv", mimeType: "text/csv",
+    buffer: Buffer.from(`${headers.join(",")}\n` +
+      "03/04/2026,First campaign,Facebook,Adults,Sales,10,20,2,30,07/08/2026\n"),
+  });
+  await expect(notice).toHaveCount(0);
+  await expect(format).toHaveValue("YYYY-MM-DD");
+  for (const [index, field] of columns.entries()) {
+    const label = `${field[0].toUpperCase()}${field.slice(1)} ` +
+      (field === "revenue" ? "(optional)" : "(required)");
+    await select(label, sources[index]);
+  }
+  await select("Date format", "MM/DD/YYYY");
+  await choices(sources);
+  await expect(format).toHaveValue("MM/DD/YYYY");
+  await confirm(page, "custom-first.csv", 1);
+  expect(await exported(page)).toEqual([
+    { date: "2026-03-04", campaign: "First campaign", channel: "Facebook", audience: "Adults",
+      goal: "Sales", spend: "10", clicks: "20", conversions: "2", revenue: "30" },
+  ]);
+
+  // Same complete header set, reversed order and new values. Custom source
+  // names cannot be recovered by alias suggestions or positional mapping.
+  const laterRows = [
+    ["2026-09-01", "Second A", "Instagram", "Students", "Leads", "15", "30", "3", "45", "2026-08-07"],
+    ["2026-09-02", "Second B", "Facebook", "Adults", "Sales", "25", "50", "5", "75", "2026-10-09"],
+  ];
+  await upload(page, {
+    name: "custom-reordered.csv", mimeType: "text/csv",
+    buffer: Buffer.from([
+      [...headers].reverse().join(","),
+      ...laterRows.map(row => [...row].reverse().join(",")),
+    ].join("\n")),
+  });
+  await expect(notice).toBeVisible();
+  await choices(sources);
+  // The previous file's month-first format must not carry into this file.
+  await review("When", [
+    ["2", "2026-09-01", "2026-09-01"], ["3", "2026-09-02", "2026-09-02"],
+  ]);
+  await select("Date (required)", "Other date");
+  await choices(["Other date", ...sources.slice(1)]);
+  await review("Other date", [
+    ["2", "2026-08-07", "2026-08-07"], ["3", "2026-10-09", "2026-10-09"],
+  ]);
+  await confirm(page, "custom-reordered.csv", 2);
+  // Every downloaded field is hand-authored; the date must be the edited
+  // source, while the other fields retain their saved source-name choices.
+  expect(await exported(page)).toEqual([
+    { date: "2026-08-07", campaign: "Second A", channel: "Instagram", audience: "Students",
+      goal: "Leads", spend: "15", clicks: "30", conversions: "3", revenue: "45" },
+    { date: "2026-10-09", campaign: "Second B", channel: "Facebook", audience: "Adults",
+      goal: "Sales", spend: "25", clicks: "50", conversions: "5", revenue: "75" },
+  ]);
+});
+
 test("ambiguous date previews rerender for format and column edits before importing the latest review", async ({ page }) => {
   await upload(page, fileURLToPath(new URL("../fixtures/ambiguous_dates.csv", import.meta.url)));
   const sidebar = page.getByTestId("stSidebar");
