@@ -15,6 +15,23 @@ node_modules
 __pycache__/
 *.py[cod]
 
+# local secrets and credential files
+.env
+.env.*
+.envrc
+.netrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Example environment files must contain placeholders only.
+!.env.example
+!.env.sample
+
 # IDEs and editors
 /.idea
 .project
