@@ -370,6 +370,72 @@ test("shared filters recompute monthly revenue without resetting visible time-se
   await assertSeries(page, "Monthly", "Revenue · USD", allDates, [30, 130, null]);
 });
 
+for (const { interval, metric, filteredValues } of [
+  { interval: "Monthly", metric: "Revenue · USD", filteredValues: [30, 90, 300] },
+  { interval: "Weekly", metric: "ROI · %", filteredValues: [20, null, null, null, null, 200] },
+] as const) {
+  test(`empty shared-filter intersection removes ${interval.toLowerCase()} ${metric} and recovers default chart controls`, async ({ page }) => {
+    await upload(page, fixture);
+    await confirm(page, "aliased_campaigns.csv", 6);
+    await selectSeries(page, "Group by", interval);
+    await selectSeries(page, "Metric", metric);
+    const golden = seriesGolden[interval];
+    await assertSeries(page, interval, metric, golden.dates,
+      golden.buckets.map(bucket => bucket[metric === "Revenue · USD" ? 3 : 4]));
+
+    // Both selections have records on their own, but Facebook has no Students.
+    // Prove a populated filtered chart before making the intersection empty.
+    await choose(page, "Channel", "Facebook");
+    await recordCount(page, 3, 6);
+    await assertSeries(page, interval, metric, golden.dates, [...filteredValues]);
+    await choose(page, "Audience", "Students");
+    await recordCount(page, 0, 6);
+    const panel = await openView(page, "Time Series");
+    const empty = panel.getByText(
+      "No campaigns match these filters. Widen the date range or clear one or more filters.",
+      { exact: true },
+    );
+    await expect(empty).toBeVisible();
+    await expect(panel.getByRole("heading", { name: "Performance over time", exact: true })).toBeVisible();
+    // app.py renders neither controls nor a figure in the filtered.empty branch.
+    // Require removal, not merely invisibility, to catch stale Plotly data.
+    await expect(panel.getByTestId("stPlotlyChart")).toHaveCount(0);
+    await expect(panel.locator(".js-plotly-plot")).toHaveCount(0);
+    await expect(panel.getByTestId("stSelectbox")).toHaveCount(0);
+    await expect(panel.getByRole("combobox")).toHaveCount(0);
+
+    const sidebar = page.getByTestId("stSidebar");
+    for (const [label, selection] of [["Channel", "Facebook"], ["Audience", "Students"]]) {
+      const widget = sidebar.getByTestId("stMultiSelect").filter({
+        has: page.getByText(label, { exact: true }),
+      });
+      await expect(widget.getByRole("combobox")).toBeEnabled();
+      await expect(widget.getByTestId("stMultiSelectTagsContainer")).toHaveText(selection);
+    }
+    const clear = sidebar.getByRole("button", { name: "Clear filters", exact: true });
+    await expect(clear).toBeEnabled();
+    await clear.click();
+    await recordCount(page, 6, 6);
+    await expect(sidebar.getByTestId("stMultiSelectTagsContainer")).toHaveCount(3);
+    for (const tags of await sidebar.getByTestId("stMultiSelectTagsContainer").all()) {
+      await expect(tags).toHaveText("");
+    }
+
+    // The unkeyed selectboxes are absent for an entire empty-state rerun, so
+    // Streamlit cleans up their widget state. Clear filters restores defaults,
+    // unlike a nonempty filter change, which preserves the selected choices.
+    await assertSeries(page, "Daily", "Spend · USD", seriesGolden.Daily.dates,
+      seriesGolden.Daily.buckets.map(bucket => bucket[0]));
+    await expect(empty).toHaveCount(0);
+
+    // Recovery must leave the visible controls usable, not just redraw a chart.
+    await selectSeries(page, "Group by", interval);
+    await selectSeries(page, "Metric", metric);
+    await assertSeries(page, interval, metric, golden.dates,
+      golden.buckets.map(bucket => bucket[metric === "Revenue · USD" ? 3 : 4]));
+  });
+}
+
 test("weekly ROI remains selected as filters remove missing revenue or select zero spend", async ({ page }) => {
   await upload(page, fixture);
   await confirm(page, "aliased_campaigns.csv", 6);

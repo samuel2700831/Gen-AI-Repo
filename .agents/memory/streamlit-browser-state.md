@@ -15,6 +15,12 @@ Wait for Streamlit's rerendered controls to become unique before interacting aft
 
 **How to apply:** Use retrying locator assertions for reconciliation; do not add fixed sleeps, select an arbitrary duplicate, or retry a whole failing test.
 
+Conditionally unrendered Streamlit widgets lose their selections after a full rerun; distinguish this from nonempty filter changes.
+
+**Why:** Native browser verification confirmed that entering the time-series empty state removes the unkeyed chart controls, and clearing filters recreates them with defaults rather than the previous choices.
+
+**How to apply:** Assert control absence during empty states and visible defaults on recovery. If future requirements call for preserving choices, retain them independently of conditional widget rendering.
+
 Streamlit's canvas dataframe accessibility content may appear only after native focus and keyboard interaction, and browser locators classify the fallback table as hidden.
 
 **Why:** Browser-visible search regressions need to check actual rendered campaign values; an unfocused canvas gives no accessible rows, even though the table is visibly populated.
