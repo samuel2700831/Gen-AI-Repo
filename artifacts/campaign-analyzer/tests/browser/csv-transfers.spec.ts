@@ -476,6 +476,132 @@ test("ambiguous date previews rerender for format and column edits before import
   ]);
 });
 
+test("later date-preview pages refresh native format and mapping edits and confirmation validates off-page rows", async ({ page }) => {
+  test.setTimeout(90_000);
+  // Three pages, with an impossible date only in the alternate column on the
+  // last page. All first-page dates are valid in either slash-separated format.
+  const dates = [
+    "01/04/2026", "02/04/2026", "03/04/2026", "04/04/2026", "05/04/2026", "06/04/2026",
+    "07/04/2026", "08/04/2026", "09/04/2026", "10/04/2026", "11/04/2026", "12/04/2026",
+    "01/04/2026", "02/04/2026", "03/04/2026", "04/04/2026", "05/04/2026", "06/04/2026",
+    "07/04/2026", "08/04/2026", "09/04/2026", "10/04/2026",
+  ];
+  const isoDates = [
+    "2026-04-01", "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06",
+    "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10", "2026-04-11", "2026-04-12",
+    "2026-04-01", "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05", "2026-04-06",
+    "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10",
+  ];
+  await upload(page, {
+    name: "paged-dates.csv", mimeType: "text/csv",
+    buffer: Buffer.from(`${columns.join(",")},Other date\n` + dates.map((date, index) =>
+      `${date},Paged ${index + 1},Facebook,Adults,Sales,10,20,2,30,` +
+      (index === 20 ? "31/02/2026" : date.replace("/04/", "/08/")),
+    ).join("\n")),
+  });
+  const sidebar = page.getByTestId("stSidebar");
+  const previewPage = sidebar.getByRole("spinbutton", { name: "Date preview page", exact: true });
+  const format = sidebar.getByRole("combobox", { name: "Date format", exact: true });
+  const mapping = sidebar.getByRole("combobox", { name: "Date (required)", exact: true });
+  await expect(previewPage).toBeEnabled();
+  await expect(previewPage).toHaveAttribute("min", "1");
+  await expect(previewPage).toHaveAttribute("max", "3");
+
+  async function select(control: Locator, option: string) {
+    await expect(control).toHaveCount(1);
+    await control.click();
+    await control.fill(option);
+    await control.press("ArrowDown");
+    await page.getByRole("option", { name: option, exact: true }).click();
+  }
+
+  async function goToPage(number: number) {
+    await previewPage.fill(String(number));
+    await previewPage.press("Enter");
+    await expect(previewPage).toHaveValue(String(number));
+  }
+
+  async function reviewed(
+    number: number, dateFormat: string, source: string, rows: string[][], totalRows: number,
+  ) {
+    await expect(previewPage).toHaveValue(String(number));
+    await expect(format).toHaveValue(dateFormat);
+    await expect(mapping).toHaveValue(source);
+    const ranges = ["2–11", "12–21", "22–23"];
+    await expect(sidebar.getByText(
+      `Page ${number} of 3 · CSV rows ${ranges[number - 1]} · 22 dates total.`, { exact: true },
+    )).toBeVisible();
+    const tables = sidebar.getByTestId("stDataFrame");
+    await expect(tables).toHaveCount(2);
+    await expect(tables.nth(1)).toBeVisible();
+    await expect.poll(async () => {
+      const grid = await gridContents(page, tables.nth(1));
+      // Full pages are virtualized: compare the visible leading rows and total
+      // count. The final two-row page can be checked in its entirety.
+      return { ...grid, rows: grid.rows.slice(0, rows.length) };
+    }).toEqual({
+      count: String(totalRows + 1),
+      headers: ["CSV row", "Original date", "Interpreted date (YYYY-MM-DD)"],
+      rows,
+    });
+    await expect(page.getByText("Current dataset: sample", { exact: true })).toBeVisible();
+    await recordCount(page, 720, 720);
+    await expect(sidebar.getByRole("button", { name: "Import mapped CSV", exact: true })).toBeEnabled();
+  }
+
+  await select(format, "MM/DD/YYYY");
+  await goToPage(2);
+  await reviewed(2, "MM/DD/YYYY", "date", [
+    ["12", "11/04/2026", "2026-11-04"],
+    ["13", "12/04/2026", "2026-12-04"],
+    ["14", "01/04/2026", "2026-01-04"],
+  ], 10);
+  await goToPage(3);
+  await reviewed(3, "MM/DD/YYYY", "date", [
+    ["22", "09/04/2026", "2026-09-04"], ["23", "10/04/2026", "2026-10-04"],
+  ], 2);
+  // Both edits must refresh the comparison without silently returning to page 1.
+  await select(format, "DD/MM/YYYY");
+  await reviewed(3, "DD/MM/YYYY", "date", [
+    ["22", "09/04/2026", "2026-04-09"], ["23", "10/04/2026", "2026-04-10"],
+  ], 2);
+  await select(mapping, "Other date");
+  await reviewed(3, "DD/MM/YYYY", "Other date", [
+    ["22", "31/02/2026", "Invalid date"], ["23", "10/08/2026", "2026-08-10"],
+  ], 2);
+
+  // Confirm from a wholly valid page: validation must still find CSV row 22.
+  await goToPage(1);
+  await reviewed(1, "DD/MM/YYYY", "Other date", [
+    ["2", "01/08/2026", "2026-08-01"],
+    ["3", "02/08/2026", "2026-08-02"],
+    ["4", "03/08/2026", "2026-08-03"],
+  ], 10);
+  await sidebar.getByRole("button", { name: "Import mapped CSV", exact: true }).click();
+  await expect(sidebar.getByText(
+    "Row 22: date must be a valid DD/MM/YYYY date. " +
+    "Every row must use the selected format; month/day order is never guessed.", { exact: true },
+  )).toBeVisible();
+  await expect(sidebar.getByText(
+    "Import failed. Your current dataset and filters are unchanged.", { exact: true },
+  )).toBeVisible();
+  await expect(page.getByText("Current dataset: sample", { exact: true })).toBeVisible();
+  await recordCount(page, 720, 720);
+
+  // Retry on the last page using the valid column; download proves all 22 rows,
+  // not just the displayed two, were committed with the latest choices.
+  await goToPage(3);
+  await select(mapping, "date");
+  await reviewed(3, "DD/MM/YYYY", "date", [
+    ["22", "09/04/2026", "2026-04-09"], ["23", "10/04/2026", "2026-04-10"],
+  ], 2);
+  await confirm(page, "paged-dates.csv", 22);
+  expect(await exported(page)).toEqual(isoDates.map((date, index) => ({
+    date, campaign: `Paged ${index + 1}`, channel: "Facebook", audience: "Adults",
+    goal: "Sales", spend: "10", clicks: "20", conversions: "2", revenue: "30",
+  })));
+});
+
 test("native literal searches change only campaign details, never other views or downloaded rows", async ({ page }) => {
   test.setTimeout(180_000);
   await upload(page, fileURLToPath(new URL("../fixtures/search_campaigns.csv", import.meta.url)));
