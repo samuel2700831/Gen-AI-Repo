@@ -20,3 +20,15 @@ Streamlit's canvas dataframe accessibility content may appear only after native 
 **Why:** Browser-visible search regressions need to check actual rendered campaign values; an unfocused canvas gives no accessible rows, even though the table is visibly populated.
 
 **How to apply:** Activate the dataframe with native keyboard interaction and inspect its accessibility fallback, including hidden content. Check row counts as well as cells because fallback rows are virtualized.
+
+Dataframe toolbar exports can use an operating-system save picker instead of emitting a browser download event.
+
+**Why:** Headless Chromium could activate the toolbar but never produced a download event with its native File System Access picker. Removing that browser capability before loading the page allowed Streamlit's real Blob-download fallback to run.
+
+**How to apply:** For future native toolbar audits, select the unsupported-picker browser path before navigation; do not mock CSV generation or download contents. Native keyboard activation avoids toolbar pointer interception by the grid.
+
+Keep fixture batches small when comparing every canvas-accessibility row.
+
+**Why:** Even seven short records exceeded the visible accessibility window at the browser regression viewport. The reported total row count includes records absent from the fallback DOM.
+
+**How to apply:** Use batches small enough for all expected rows to render, or navigate and collect virtualized rows explicitly; never equate the visible fallback with the full dataset.

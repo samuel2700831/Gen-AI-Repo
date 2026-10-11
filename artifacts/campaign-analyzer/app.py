@@ -418,6 +418,10 @@ def empty_message() -> None:
 
 
 def main() -> None:
+    # Streamlit's table CSV/clipboard exports bypass export_csv's formula
+    # escaping. Keep raw table presentation and route exports through our safe
+    # dedicated download instead (this option does not affect download_button).
+    st.set_option("client.disableDataExport", True)
     st.set_page_config(
         page_title="AdScope · Campaign intelligence",
         layout="wide",

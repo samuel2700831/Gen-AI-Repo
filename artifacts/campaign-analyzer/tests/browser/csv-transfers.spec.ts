@@ -381,6 +381,80 @@ test("native downloads escape formula metadata and use shared filters rather tha
   expect(await exported(page)).toEqual(full);
 });
 
+test("unsafe dataframe exports are unavailable while tables and safe CSV exports retain metadata", async ({ page }) => {
+  test.setTimeout(120_000);
+  // Audit before mitigation: six actual toolbar CSV downloads (two batches in
+  // all three views) were parsed via csv-parse. Overview exported Campaign
+  // formulas unchanged; Details also exported them in audiences/goals.
+  // Platform Comparison contained only valid channels and numeric aggregates.
+  // Regression contract: built-in exports stay disabled, raw table values stay
+  // unchanged, and the dedicated native CSV download escapes every case.
+  const cases: { input: string | null; expected: string }[] = JSON.parse(await readFile(
+    new URL("../fixtures/export_metadata.json", import.meta.url), "utf8"));
+  const valid = cases.filter((item): item is { input: string; expected: string } =>
+    item.input !== null && item.input.trim() !== "");
+  const csvCell = (value: string) => `"${value.replaceAll('"', '""')}"`;
+  // Four rows per import keeps every case within Overview's top-eight limit
+  // and Glide's visible-row accessibility window.
+  // A supported channel is intentional: formula channels are rejected by import.
+  for (let offset = 0; offset < valid.length; offset += 4) {
+    const batch = valid.slice(offset, offset + 4);
+    const body = batch.map((item, index) => [
+      `2026-09-${String(index + 1).padStart(2, "0")}`,
+      item.input, "Facebook", item.input, item.input, "12.5", "10", "1", "30",
+    ].map(csvCell).join(",")).join("\n");
+    await upload(page, {
+      name: "toolbar-metadata.csv", mimeType: "text/csv",
+      buffer: Buffer.from(columns.join(",") + "\n" + body + "\n"),
+    });
+    await confirm(page, "toolbar-metadata.csv", batch.length);
+    const normalized = batch.map(item => item.input.trim());
+    const campaigns = [...new Set(normalized)];
+    for (const name of ["Overview", "Platform Comparison", "Campaign Details"]) {
+      await test.step(`${name}, metadata cases ${offset + 1}–${offset + batch.length}`, async () => {
+        const panel = await openView(page, name);
+        const table = panel.getByTestId("stDataFrame");
+        await expect(table).toHaveCount(1);
+        await table.hover();
+        await expect(table.getByRole("button", {
+          name: "Download as CSV", exact: true,
+        })).toHaveCount(0);
+        const grid = await gridContents(page, panel);
+        expect(grid.count).toBe(String((name === "Platform Comparison" ? 1 : campaigns.length) + 1));
+        for (const row of grid.rows) {
+          const campaignIndex = grid.headers.indexOf("Campaign");
+          const groupSize = campaignIndex < 0 ? batch.length :
+            normalized.filter(value => value === row[campaignIndex]).length;
+          expect(displayedSpend(row[grid.headers.indexOf("Spend · USD")])).toBe(12.5 * groupSize);
+        }
+        const metadata = name === "Platform Comparison" ? ["Channel"] : ["Channel", "Campaign"];
+        for (const field of metadata) {
+          const index = grid.headers.indexOf(field);
+          expect(index).toBeGreaterThanOrEqual(0);
+          expect(grid.rows.map(row => row[index]).sort()).toEqual(
+            (field === "Channel" ? Array(name === "Platform Comparison" ? 1 : campaigns.length).fill("Facebook")
+              : campaigns).sort());
+        }
+      });
+    }
+    const rows = await exported(page);
+    expect(rows).toEqual(batch.map((item, index) => {
+      const value = item.expected.startsWith("'") && !item.input.trim().startsWith("'")
+        ? "'" + item.expected.slice(1).trim() : item.expected.trim();
+      return {
+        date: `2026-09-${String(index + 1).padStart(2, "0")}`,
+        campaign: value, channel: "Facebook", audience: value, goal: value,
+        spend: "12.5", clicks: "10", conversions: "1", revenue: "30",
+      };
+    }));
+    for (const row of rows) {
+      for (const field of ["campaign", "channel", "audience", "goal"]) {
+        expect(row[field].trimStart()).not.toMatch(/^[=+\-@]/);
+      }
+    }
+  }
+});
+
 test("sample control downloads a complete, valid CSV with frozen totals", async ({ page }) => {
   const rows = await download(page, "Download sample CSV", "adscope-sample.csv");
   const totals = JSON.parse(await readFile(
